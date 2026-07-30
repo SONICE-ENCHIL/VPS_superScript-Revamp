@@ -104,6 +104,7 @@ UDP_SHARE_ENFORCER_SCRIPT="/usr/local/bin/VPS_superScript-udp-share.sh"
 UDP_SHARE_ENFORCER_SERVICE="/etc/systemd/system/VPS_superScript-udp-share.service"
 UDP_SHARE_STATE_FILE="$DB_DIR/udp_share.state"       # "on" / "off" global flag
 UDP_SHARE_HEALTH_FILE="$DB_DIR/udp_share.health"     # runtime parser health for the menu
+UDP_SHARE_ACTION_FILE="$DB_DIR/udp_share.action"     # warn | lock | drop (re-read live by daemon)
 UDP_SHARE_LOG="/var/log/VPS_superScript_udp_share.log"
 
 DESEC_TOKEN="V55cFY8zTictLCPfviiuX5DHjs15"
@@ -1604,7 +1605,7 @@ sync_runtime_components_if_needed() {
     fi
     # Re-arm UDP anti-sharing enforcement across an upgrade/re-setup.
     if [[ "$(cat "$UDP_SHARE_STATE_FILE" 2>/dev/null)" == "on" ]]; then
-        local udpshare_marker="# VPS_superScript udp-share enforcer version 2026-07-30.2"
+        local udpshare_marker="# VPS_superScript udp-share enforcer version 2026-07-30.3"
         if ! systemctl is-active --quiet VPS_superScript-udp-share 2>/dev/null; then
             enable_udp_share >/dev/null 2>&1
         elif ! grep -Fq "$udpshare_marker" "$UDP_SHARE_ENFORCER_SCRIPT" 2>/dev/null; then
@@ -5242,7 +5243,7 @@ hwid_lock_menu() {
 write_udp_share_enforcer() {
     cat > "$UDP_SHARE_ENFORCER_SCRIPT" <<'UDPSHAREEOF'
 #!/bin/bash
-# VPS_superScript udp-share enforcer version 2026-07-30.2
+# VPS_superScript udp-share enforcer version 2026-07-30.3
 # Per-user concurrent source-IP limiter for udp-custom.
 #
 # WHY THIS EXISTS: UDP is connectionless and udp-custom runs as root, so there
@@ -5287,7 +5288,34 @@ MIN_HITS=2                # auth events before an IP counts as established
 STRIKES_NEEDED=3          # consecutive over-limit checks before acting
 DEFAULT_LIMIT=2           # mobile IPs rotate; 1 is too tight as a default
 COOLDOWN=600              # seconds an auto-locked account stays locked
-ACTION="lock"             # lock | drop | warn
+ACTION_FILE="/etc/VPS_superScript/udp_share.action"
+# warn = observe only (log what WOULD be acted on, touch nothing)
+# lock = temporary shadow lock on the offending account (recommended once tuned)
+# drop = port-scoped iptables DROP of the newest source IPs (fallback)
+# Defaults to warn: the tuning below cannot be validated against a given
+# network's carrier-NAT behaviour in advance, and a false positive locks out a
+# paying customer. Observe first, then switch to lock from the menu.
+ACTION="warn"
+PREV_ACTION=""
+read_action() {
+    local a
+    a=$(cat "$ACTION_FILE" 2>/dev/null | tr -d '[:space:]')
+    case "$a" in
+        warn|lock|drop) ACTION="$a" ;;
+        *)              ACTION="warn" ;;
+    esac
+    # On a mode change, undo the artefacts of the mode we just left so that
+    # switching to a softer mode never leaves a customer locked or blocked.
+    if [ -n "$PREV_ACTION" ] && [ "$ACTION" != "$PREV_ACTION" ]; then
+        log "MODE $PREV_ACTION -> $ACTION"
+        case "$PREV_ACTION" in
+            lock) release_all_locks ;;
+            drop) flush_our_rules; DROPPED=() ;;
+        esac
+        ACTED=(); STRIKES=()
+    fi
+    PREV_ACTION="$ACTION"
+}
 COMMENT_TAG="ffudpshare"  # iptables comment so we can find/remove only our rules
 TICK=15                   # maintenance wakeup interval (prune + health) in seconds
 HEALTH_TMP="${HEALTH_FILE}.tmp"
@@ -5485,7 +5513,10 @@ enforce_user() {
             done
             ;;
         *)
-            log "SHARING user=$u limit=$lim live_ips=$n -> WARN only (no action taken)"
+            # warn: observe only. Log exactly what would have happened so the
+            # operator can judge the tuning against real traffic before any
+            # account is ever locked.
+            log "WOULD-ACT user=$u limit=$lim live_ips=$n (observe mode; no action taken)"
             ;;
     esac
 }
@@ -5540,8 +5571,9 @@ trap 'flush_our_rules; release_all_locks; exit 0' TERM INT
 flush_our_rules
 release_all_locks   # clear anything left behind by an unclean previous exit
 touch "$LOCK_STATE" 2>/dev/null; chmod 600 "$LOCK_STATE" 2>/dev/null
+read_action
 LAST_PRUNE=$(date +%s)
-write_health starting "daemon started, awaiting udp-custom log lines"
+write_health starting "daemon started in ${ACTION} mode, awaiting udp-custom log lines"
 
 while true; do
     while true; do
@@ -5562,6 +5594,7 @@ while true; do
         now=$(date +%s)
         if (( now - LAST_PRUNE >= TICK )); then
             prune; LAST_PRUNE=$now
+            read_action   # pick up a menu-side mode change without a restart
             if (( CONN_SHAPED > 0 && IDS_PARSED == 0 )); then
                 write_health unparseable "saw $CONN_SHAPED connection-shaped log lines but extracted 0 identities — udp-custom log format not recognized; adjust extract_line() patterns"
             else
@@ -5581,6 +5614,12 @@ UDPSHAREEOF
 
 enable_udp_share() {
     mkdir -p "$DB_DIR" 2>/dev/null
+    # Default to observe-only on first enable so switching this on can never
+    # lock a paying customer before the operator has seen what it detects.
+    if [[ ! -f "$UDP_SHARE_ACTION_FILE" ]]; then
+        echo "warn" > "$UDP_SHARE_ACTION_FILE"
+        chmod 600 "$UDP_SHARE_ACTION_FILE" 2>/dev/null
+    fi
     write_udp_share_enforcer
     cat > "$UDP_SHARE_ENFORCER_SERVICE" <<EOF
 [Unit]
@@ -5656,6 +5695,44 @@ udp_share_health_field() {
     echo "$val"
 }
 
+# Choose what the enforcer does when it decides an account is being shared.
+# The daemon re-reads this file every ~15s, so no restart is needed.
+udp_share_set_action() {
+    echo
+    echo -e "${C_BOLD}--- 🎚️ UDP Anti-Sharing Action Mode ---${C_RESET}\n"
+    echo -e "  ${C_CYAN}[1] Observe${C_RESET} ${C_DIM}(recommended first)${C_RESET}"
+    echo -e "      ${C_DIM}Logs every account it would act on, changes nothing. Run this for a"
+    echo -e "      week and read the log before trusting it with live customers.${C_RESET}\n"
+    echo -e "  ${C_YELLOW}[2] Lock account${C_RESET}"
+    echo -e "      ${C_DIM}Temporarily locks the sharing account (auto-released after a cooldown)."
+    echo -e "      Targets the sharer, not their IP, so other customers behind the same"
+    echo -e "      carrier NAT are unaffected. Use once observe mode looks correct.${C_RESET}\n"
+    echo -e "  ${C_RED}[3] Drop source IPs${C_RESET}"
+    echo -e "      ${C_DIM}Blocks the newest source IPs on the udp-custom port only. Under carrier"
+    echo -e "      NAT this can affect unrelated customers sharing that address — prefer"
+    echo -e "      option 2 unless you have a specific reason.${C_RESET}\n"
+    read -r -p "👉 Select mode (1-3, blank to cancel): " _m
+    case "$_m" in
+        1) echo "warn" > "$UDP_SHARE_ACTION_FILE"
+           echo -e "\n${C_GREEN}✅ Mode set to OBSERVE — nothing will be enforced.${C_RESET}"
+           echo -e "${C_DIM}   Watch for WOULD-ACT lines in option 3.${C_RESET}" ;;
+        2) echo "lock" > "$UDP_SHARE_ACTION_FILE"
+           echo -e "\n${C_YELLOW}⚠️ Mode set to LOCK — sharing accounts will be temporarily locked.${C_RESET}" ;;
+        3) echo -e "\n${C_YELLOW}⚠️ Under carrier NAT this can block customers who are not sharing.${C_RESET}"
+           read -r -p "👉 Type 'yes' to confirm DROP mode: " _c
+           if [[ "$_c" == "yes" ]]; then
+               echo "drop" > "$UDP_SHARE_ACTION_FILE"
+               echo -e "\n${C_RED}⚠️ Mode set to DROP.${C_RESET}"
+           else
+               echo -e "\n${C_DIM}Cancelled — mode unchanged.${C_RESET}"; return
+           fi ;;
+        "") echo -e "\n${C_DIM}Cancelled — mode unchanged.${C_RESET}"; return ;;
+        *) echo -e "\n${C_RED}❌ Invalid choice — mode unchanged.${C_RESET}"; return ;;
+    esac
+    chmod 600 "$UDP_SHARE_ACTION_FILE" 2>/dev/null
+    echo -e "${C_DIM}   The enforcer picks this up within ~15s; no restart needed.${C_RESET}"
+}
+
 udp_share_menu() {
     while true; do
         clear; show_banner
@@ -5682,15 +5759,24 @@ udp_share_menu() {
             esac
         fi
         echo -e "\n  ${C_DIM}How it works: UDP has no connection to count, so this reads udp-custom's"
-        echo -e "  own log, ties each source IP to the account that authenticated, and drops"
-        echo -e "  the newest IPs once an account exceeds its ${C_RESET}${C_CYAN}connection limit${C_RESET}${C_DIM} (set when you"
-        echo -e "  create the account). It ${C_RESET}${C_BOLD}cannot${C_RESET}${C_DIM} tell two devices behind one NAT/IP apart,"
-        echo -e "  and it enforces nothing if the log can't be parsed — the health line above"
-        echo -e "  tells you which. Pair it with ${C_RESET}${C_CYAN}one account per device${C_RESET}${C_DIM} for real control.${C_RESET}\n"
+        echo -e "  own log and ties each source IP to the account that authenticated. Because"
+        echo -e "  mobile IPs rotate, it only acts when an account stays over its ${C_RESET}${C_CYAN}connection"
+        echo -e "  limit${C_RESET}${C_DIM} across several checks — not on a single extra IP. It ${C_RESET}${C_BOLD}cannot${C_RESET}${C_DIM} tell two"
+        echo -e "  devices behind one carrier NAT apart, and enforces nothing if the log can't"
+        echo -e "  be parsed. Pair it with ${C_RESET}${C_CYAN}one account per device${C_RESET}${C_DIM} and ${C_RESET}${C_CYAN}bandwidth quotas${C_RESET}${C_DIM} —"
+        echo -e "  quotas are unaffected by NAT and catch what this cannot.${C_RESET}\n"
+        local curmode; curmode=$(cat "$UDP_SHARE_ACTION_FILE" 2>/dev/null | tr -d '[:space:]')
+        case "$curmode" in
+            lock) echo -e "  Mode: ${C_YELLOW}🔒 LOCK${C_RESET} ${C_DIM}(temporarily locks the sharing account)${C_RESET}" ;;
+            drop) echo -e "  Mode: ${C_YELLOW}⛔ DROP${C_RESET} ${C_DIM}(blocks newest source IPs on the udp-custom port)${C_RESET}" ;;
+            *)    echo -e "  Mode: ${C_CYAN}👁️ OBSERVE${C_RESET} ${C_DIM}(logs what it would do — nothing is enforced)${C_RESET}" ;;
+        esac
+        echo
         printf "  ${C_GREEN}[ 1]${C_RESET} %-40s\n" "✅ Enable enforcement"
         printf "  ${C_GREEN}[ 2]${C_RESET} %-40s\n" "🛑 Disable enforcement"
         printf "  ${C_GREEN}[ 3]${C_RESET} %-40s\n" "📜 View recent activity log"
         printf "  ${C_GREEN}[ 4]${C_RESET} %-40s\n" "🩺 View raw health state"
+        printf "  ${C_GREEN}[ 5]${C_RESET} %-40s\n" "🎚️ Change action mode"
         echo -e "\n  ${C_RED}[ 0]${C_RESET} ⬅️  Back"
         echo
         read -r -p "👉 Enter your choice: " uc || return
@@ -5705,6 +5791,7 @@ udp_share_menu() {
                    echo; cat "$UDP_SHARE_HEALTH_FILE" 2>/dev/null
                else echo -e "\n${C_YELLOW}ℹ️ No health state written yet (enforcer not started?).${C_RESET}"; fi
                press_enter ;;
+            5) udp_share_set_action; press_enter ;;
             0) return ;;
             *) invalid_option ;;
         esac
