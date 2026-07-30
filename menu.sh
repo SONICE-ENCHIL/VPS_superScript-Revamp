@@ -91,7 +91,20 @@ EXPORTS_DIR="/etc/VPS_superScript/exports"
 HWID_ENFORCER_SCRIPT="/usr/local/bin/VPS_superScript-hwid-enforcer.sh"
 HWID_ENFORCER_SERVICE="/etc/systemd/system/VPS_superScript-hwid-enforcer.service"
 HWID_STATE_FILE="$DB_DIR/hwid_enforce.state"         # "on" / "off" global flag
+HWID_POLICY_FILE="$DB_DIR/hwid_policy"               # "block" (secure default) / "allow"
 HWID_KICK_LOG="/var/log/VPS_superScript_hwid.log"
+
+# --- UDP Sharing Control (udp-custom) ---------------------------------------
+# Per-user concurrent source-IP limiter for udp-custom. Because UDP has no
+# per-process session to count (the relay runs as root), this daemon derives
+# identity from udp-custom's own auth log and drops the *excess* source IPs for
+# a user who exceeds their per-account connection limit. It FAILS VISIBLE: if it
+# cannot parse an identity out of the log it says so rather than pretending.
+UDP_SHARE_ENFORCER_SCRIPT="/usr/local/bin/VPS_superScript-udp-share.sh"
+UDP_SHARE_ENFORCER_SERVICE="/etc/systemd/system/VPS_superScript-udp-share.service"
+UDP_SHARE_STATE_FILE="$DB_DIR/udp_share.state"       # "on" / "off" global flag
+UDP_SHARE_HEALTH_FILE="$DB_DIR/udp_share.health"     # runtime parser health for the menu
+UDP_SHARE_LOG="/var/log/VPS_superScript_udp_share.log"
 
 DESEC_TOKEN="V55cFY8zTictLCPfviiuX5DHjs15"
 DESEC_DOMAIN="manager.VPS_superScript.qzz.io"
@@ -560,7 +573,7 @@ migrate_from_firewallfalcon() {
     done < <(find /etc /root /usr/local -name '*.bak.firewallfalcon' -print0 2>/dev/null)
     # Reload systemd and re-enable services
     systemctl daemon-reload 2>/dev/null || true
-    for svc in VPS_superScript-limiter VPS_superScript-bandwidth VPS_superScript-hwid-enforcer; do
+    for svc in VPS_superScript-limiter VPS_superScript-bandwidth VPS_superScript-hwid-enforcer VPS_superScript-udp-share; do
         if [[ -f "/etc/systemd/system/${svc}.service" ]]; then
             systemctl enable "$svc" 2>/dev/null || true
             systemctl start "$svc" 2>/dev/null || true
@@ -924,6 +937,10 @@ initial_setup() {
     # If HWID enforcement was previously enabled, re-arm it after a re-setup.
     if [[ "$(cat "$HWID_STATE_FILE" 2>/dev/null)" == "on" ]]; then
         enable_hwid_lock >/dev/null 2>&1
+    fi
+    # Same for UDP anti-sharing enforcement.
+    if [[ "$(cat "$UDP_SHARE_STATE_FILE" 2>/dev/null)" == "on" ]]; then
+        enable_udp_share >/dev/null 2>&1
     fi
     
     echo -e "${C_BLUE}🔹 Cleaning legacy dynamic SSH banner hooks...${C_RESET}"
@@ -1575,7 +1592,7 @@ sync_runtime_components_if_needed() {
     touch "$HWID_ALLOWED_DB" 2>/dev/null && chmod 600 "$HWID_ALLOWED_DB" 2>/dev/null
     hwid_sync_allowed_db
     if [[ "$(cat "$HWID_STATE_FILE" 2>/dev/null)" == "on" ]]; then
-        local hwid_enforcer_marker="# VPS_superScript HWID enforcer version 2026-06-26.1"
+        local hwid_enforcer_marker="# VPS_superScript HWID enforcer version 2026-07-29.1"
         if ! systemctl is-active --quiet VPS_superScript-hwid-enforcer 2>/dev/null; then
             enable_hwid_lock >/dev/null 2>&1
         elif ! grep -Fq "$hwid_enforcer_marker" "$HWID_ENFORCER_SCRIPT" 2>/dev/null; then
@@ -1583,6 +1600,17 @@ sync_runtime_components_if_needed() {
             # script with the comma-list matcher and restart so it takes effect.
             write_hwid_enforcer
             systemctl restart VPS_superScript-hwid-enforcer 2>/dev/null
+        fi
+    fi
+    # Re-arm UDP anti-sharing enforcement across an upgrade/re-setup.
+    if [[ "$(cat "$UDP_SHARE_STATE_FILE" 2>/dev/null)" == "on" ]]; then
+        if ! systemctl is-active --quiet VPS_superScript-udp-share 2>/dev/null; then
+            enable_udp_share >/dev/null 2>&1
+        else
+            # Refresh the daemon script in place and restart so any parser
+            # updates take effect.
+            write_udp_share_enforcer
+            systemctl restart VPS_superScript-udp-share 2>/dev/null
         fi
     fi
 
@@ -4978,20 +5006,36 @@ _hwid_flush_drops() {
 write_hwid_enforcer() {
     cat > "$HWID_ENFORCER_SCRIPT" <<'HWIDEOF'
 #!/bin/bash
-# VPS_superScript HWID enforcer version 2026-06-26.1
+# VPS_superScript HWID enforcer version 2026-07-29.1
 # VPS_superScript HWID Lock Enforcer (best-effort, reactive).
 # Reads username|hwid|strict|password from the allowed DB and watches the VPN
 # journals. The hwid column may be a comma-separated list of allowed devices; a
 # connection is OK if its device id matches ANY entry. On a strict mismatch it
 # drops the offending source IP (tagged with an iptables comment so it can be
 # cleanly removed later).
+#
+# Unverifiable-connection policy (deny-by-default): when a STRICT, HWID-locked
+# identity connects but the channel exposes no device id, the secure default is
+# to DROP it — otherwise a decrypted/reused config sails straight through on any
+# protocol that doesn't report an HWID. An operator who accepts that gap can set
+# the policy to "allow" (legacy behaviour) from the HWID menu.
 # Force a UTF-8 locale so grep -P (PCRE) is always available.
 export LC_ALL=C.UTF-8 LANG=C.UTF-8
 HWID_DB="/etc/VPS_superScript/hwid_allowed.db"
+HWID_POLICY_FILE="/etc/VPS_superScript/hwid_policy"
 LOG_FILE="/var/log/VPS_superScript_hwid.log"
 KICK_LOG="/var/log/VPS_superScript_hwid.log"
 
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$LOG_FILE"; }
+
+# Policy for strict identities whose connection carries no verifiable device id.
+# Re-read per connection (cheap) so a menu toggle takes effect without a restart.
+# "allow" = legacy pass-through; anything else (incl. missing file) = "block".
+unverified_policy() {
+    local p="block"
+    [ -f "$HWID_POLICY_FILE" ] && read -r p < "$HWID_POLICY_FILE" 2>/dev/null
+    [ "$p" = "allow" ] && echo "allow" || echo "block"
+}
 
 touch "$LOG_FILE" 2>/dev/null
 log "HWID enforcer started."
@@ -5047,8 +5091,17 @@ journalctl -u udp-custom -u zivpn -u hysteria-server -u shadowsocks-libev -u slo
     allowed_list=$(lookup_identity "$token") || continue   # not a strict/locked user
 
     if [ -z "$hwid" ]; then
-        # Binary did not log a device id — we cannot verify, so do NOT block.
-        log "UNVERIFIABLE - $token from $ip (no hwid in log); allowed=$allowed_list"
+        # This is a STRICT, HWID-locked identity, but the channel exposed no
+        # verifiable device id. Allowing it here is the old hole that let a
+        # decrypted/reused config connect freely on any protocol that doesn't
+        # report an HWID. Deny-by-default: drop unless the operator opted into
+        # the legacy "allow" policy.
+        if [ "$(unverified_policy)" = "allow" ]; then
+            log "UNVERIFIED-ALLOW - $token from $ip (no hwid in log; policy=allow); allowed=$allowed_list"
+            continue
+        fi
+        log "UNVERIFIED-BLOCK - $token from $ip (no hwid in log; policy=block); allowed=$allowed_list"
+        drop_ip "$ip" "$token"
         continue
     fi
 
@@ -5075,6 +5128,9 @@ HWIDEOF
 
 enable_hwid_lock() {
     mkdir -p "$DB_DIR" 2>/dev/null
+    # Secure default for unverifiable strict connections; created once, then
+    # left to the operator's toggle.
+    [ -f "$HWID_POLICY_FILE" ] || echo "block" > "$HWID_POLICY_FILE"
     hwid_sync_allowed_db
     write_hwid_enforcer
     cat > "$HWID_ENFORCER_SERVICE" <<EOF
@@ -5122,6 +5178,13 @@ hwid_lock_status() {
     fi
 }
 
+# Current unverifiable-connection policy: "block" (secure default) or "allow".
+hwid_policy_current() {
+    local p="block"
+    [[ -f "$HWID_POLICY_FILE" ]] && read -r p < "$HWID_POLICY_FILE" 2>/dev/null
+    [[ "$p" == "allow" ]] && echo "allow" || echo "block"
+}
+
 hwid_lock_menu() {
     while true; do
         clear; show_banner
@@ -5130,12 +5193,21 @@ hwid_lock_menu() {
         local locked_count=0
         [[ -f "$HWID_ALLOWED_DB" ]] && locked_count=$(grep -c . "$HWID_ALLOWED_DB" 2>/dev/null || echo 0)
         echo -e "  ${C_DIM}Users with an enforced HWID: ${C_CYAN}${locked_count}${C_RESET}"
-        echo -e "\n  ${C_DIM}Note: enforcement is best-effort/reactive. It kicks a wrong device only"
-        echo -e "  when the VPN log exposes a device id; users without an HWID are never${C_RESET}"
-        echo -e "  ${C_DIM}restricted. See plan/limitations for details.${C_RESET}\n"
-        printf "  ${C_GREEN}[ 1]${C_RESET} %-35s\n" "✅ Enable enforcement"
-        printf "  ${C_GREEN}[ 2]${C_RESET} %-35s\n" "🛑 Disable enforcement"
-        printf "  ${C_GREEN}[ 3]${C_RESET} %-35s\n" "📜 View recent kick log"
+        local pol; pol=$(hwid_policy_current)
+        if [[ "$pol" == "block" ]]; then
+            echo -e "  ${C_DIM}Unverifiable strict connections:${C_RESET} ${C_GREEN}BLOCK${C_RESET} ${C_DIM}(secure default)${C_RESET}"
+        else
+            echo -e "  ${C_DIM}Unverifiable strict connections:${C_RESET} ${C_YELLOW}ALLOW${C_RESET} ${C_DIM}(legacy — no device check on unreporting protocols)${C_RESET}"
+        fi
+        echo -e "\n  ${C_DIM}How it works: enforcement is reactive — it reads the VPN service logs and"
+        echo -e "  can only verify a device when the protocol reports one. It ${C_RESET}${C_BOLD}cannot${C_RESET}${C_DIM} stop a"
+        echo -e "  decrypted/reused config on protocols that don't. For dependable device"
+        echo -e "  control, rely on the per-account ${C_RESET}${C_CYAN}connection limit${C_RESET}${C_DIM} (set when you create the"
+        echo -e "  account) and issue ${C_RESET}${C_CYAN}one account per device${C_RESET}${C_DIM}.${C_RESET}\n"
+        printf "  ${C_GREEN}[ 1]${C_RESET} %-40s\n" "✅ Enable enforcement"
+        printf "  ${C_GREEN}[ 2]${C_RESET} %-40s\n" "🛑 Disable enforcement"
+        printf "  ${C_GREEN}[ 3]${C_RESET} %-40s\n" "📜 View recent kick log"
+        printf "  ${C_GREEN}[ 4]${C_RESET} %-40s\n" "🔀 Toggle unverifiable-connection policy"
         echo -e "\n  ${C_RED}[ 0]${C_RESET} ⬅️  Back"
         echo
         read -r -p "👉 Enter your choice: " hc || return
@@ -5145,6 +5217,327 @@ hwid_lock_menu() {
             3) if [[ -f "$HWID_KICK_LOG" ]]; then
                    echo; tail -n 30 "$HWID_KICK_LOG" 2>/dev/null
                else echo -e "\n${C_YELLOW}ℹ️ No HWID activity logged yet.${C_RESET}"; fi
+               press_enter ;;
+            4) mkdir -p "$DB_DIR" 2>/dev/null
+               if [[ "$(hwid_policy_current)" == "block" ]]; then
+                   echo "allow" > "$HWID_POLICY_FILE"
+                   echo -e "\n${C_YELLOW}⚠️ Policy set to ALLOW.${C_RESET}"
+                   echo -e "${C_DIM}Strict users may now connect on protocols that don't report an HWID —"
+                   echo -e "there is NO device check on those, so a reused config gets through.${C_RESET}"
+               else
+                   echo "block" > "$HWID_POLICY_FILE"
+                   echo -e "\n${C_GREEN}✅ Policy set to BLOCK (secure default).${C_RESET}"
+                   echo -e "${C_DIM}Strict users are dropped when their device can't be verified.${C_RESET}"
+               fi
+               echo -e "${C_DIM}Takes effect immediately — the enforcer re-reads the policy per connection.${C_RESET}"
+               press_enter ;;
+            0) return ;;
+            *) invalid_option ;;
+        esac
+    done
+}
+
+# ── UDP Sharing Control (udp-custom per-user concurrent-IP limiter) ──────────
+write_udp_share_enforcer() {
+    cat > "$UDP_SHARE_ENFORCER_SCRIPT" <<'UDPSHAREEOF'
+#!/bin/bash
+# VPS_superScript udp-share enforcer version 2026-07-29.1
+# Per-user concurrent source-IP limiter for udp-custom.
+#
+# WHY THIS EXISTS: UDP is connectionless and udp-custom runs as root, so there
+# is no per-user process to count or kill (unlike SSH). The only identity signal
+# is udp-custom's own auth log. This daemon tails that log, maps each accepted
+# connection to (user -> source IP), expires idle IPs, and when a user is seen
+# from more distinct IPs than their per-account limit it DROPS the newest
+# offending source IPs (tagged with an iptables comment for clean removal).
+#
+# FAIL-VISIBLE: udp-custom's exact log vocabulary can vary by build. If the
+# daemon sees connection-shaped lines but cannot extract identities, it records
+# an "unparseable" health state so the menu warns loudly instead of pretending
+# to protect. Adjust the extraction patterns below to match your build's log.
+export LC_ALL=C.UTF-8 LANG=C.UTF-8
+DB_FILE="/etc/VPS_superScript/users.db"
+HEALTH_FILE="/etc/VPS_superScript/udp_share.health"
+LOG_FILE="/var/log/VPS_superScript_udp_share.log"
+IDLE_TIMEOUT=120          # seconds before an idle source IP is forgotten
+DEFAULT_LIMIT=1           # used if a user has no numeric limit in users.db
+COMMENT_TAG="ffudpshare"  # iptables comment so we can find/remove only our rules
+TICK=15                   # maintenance wakeup interval (prune + health) in seconds
+HEALTH_TMP="${HEALTH_FILE}.tmp"
+
+log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOG_FILE"; }
+
+# Per-account connection limit = 4th colon field of users.db (user:pass:expiry:limit:...)
+user_limit() {
+    local u="$1" line lim
+    line=$(grep -m1 "^${u}:" "$DB_FILE" 2>/dev/null)
+    [ -z "$line" ] && { echo "$DEFAULT_LIMIT"; return; }
+    lim=$(printf '%s' "$line" | cut -d: -f4)
+    [[ "$lim" =~ ^[0-9]+$ ]] || lim="$DEFAULT_LIMIT"
+    (( lim < 1 )) && lim="$DEFAULT_LIMIT"
+    echo "$lim"
+}
+
+drop_ip() {
+    local ip="$1"
+    iptables -C INPUT -p udp -s "$ip" -m comment --comment "$COMMENT_TAG" -j DROP 2>/dev/null && return 0
+    iptables -I INPUT -p udp -s "$ip" -m comment --comment "$COMMENT_TAG" -j DROP 2>/dev/null
+    command -v conntrack >/dev/null 2>&1 && conntrack -D -p udp -s "$ip" >/dev/null 2>&1
+}
+
+undrop_ip() {
+    local ip="$1"
+    while iptables -C INPUT -p udp -s "$ip" -m comment --comment "$COMMENT_TAG" -j DROP 2>/dev/null; do
+        iptables -D INPUT -p udp -s "$ip" -m comment --comment "$COMMENT_TAG" -j DROP 2>/dev/null || break
+    done
+}
+
+# Health states: starting | active | unparseable
+write_health() {
+    local state="$1" note="$2"
+    { echo "state=$state"
+      echo "updated=$(date '+%Y-%m-%d %H:%M:%S')"
+      echo "epoch=$(date +%s)"
+      echo "lines_seen=$LINES_SEEN"
+      echo "ids_parsed=$IDS_PARSED"
+      echo "active_ips=$ACTIVE_TOTAL"
+      echo "note=$note"
+    } > "$HEALTH_TMP" 2>/dev/null && mv "$HEALTH_TMP" "$HEALTH_FILE" 2>/dev/null
+}
+
+declare -A LAST_SEEN      # "user|ip" -> epoch last seen
+declare -A FIRST_SEEN     # "user|ip" -> epoch first seen (oldest kept, newest dropped)
+declare -A DROPPED        # "user|ip" -> 1 if we have an iptables DROP for it
+LINES_SEEN=0              # total log lines read
+CONN_SHAPED=0            # lines that looked like a connect/auth event
+IDS_PARSED=0             # connect-shaped lines we extracted user+ip from
+ACTIVE_TOTAL=0           # distinct active (user,ip) pairs
+
+# Extraction — adjust to match your udp-custom build's log vocabulary.
+# Sets KIND=conn plus USR and IP when a connection-shaped line is parsed.
+extract_line() {
+    local line="$1"
+    KIND=""; USR=""; IP=""
+    printf '%s' "$line" | grep -qiE 'connect|accept|auth|login|session|new client' || return
+    CONN_SHAPED=$((CONN_SHAPED+1))
+    KIND="conn"
+    IP=$(printf '%s' "$line" | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -n1)
+    USR=$(printf '%s' "$line" | grep -oiP '(?:user(?:name)?[:=[:space:]]+)\K[A-Za-z0-9._-]+' | head -n1)
+    [ -z "$USR" ] && USR=$(printf '%s' "$line" | grep -oiP '(?:\bfor[[:space:]]+)\K[A-Za-z0-9._-]+' | head -n1)
+}
+
+# When a user is seen from more distinct IPs than their limit, keep the oldest
+# $limit source IPs and DROP the newer ones.
+enforce_user() {
+    local u="$1" lim key ip first entry i n
+    lim=$(user_limit "$u")
+    local ips=()
+    for key in "${!LAST_SEEN[@]}"; do
+        [ "${key%%|*}" = "$u" ] || continue
+        first="${FIRST_SEEN[$key]:-${LAST_SEEN[$key]}}"
+        ips+=("$first|$key")
+    done
+    n=${#ips[@]}
+    (( n <= lim )) && return
+    local sorted=()
+    while IFS= read -r entry; do sorted+=("$entry"); done < <(printf '%s\n' "${ips[@]}" | sort -t'|' -k1,1n)
+    i=0
+    for entry in "${sorted[@]}"; do
+        i=$((i+1))
+        (( i <= lim )) && continue
+        key="${entry#*|}"; ip="${key#*|}"
+        if [ -z "${DROPPED[$key]}" ]; then
+            drop_ip "$ip"
+            DROPPED[$key]=1
+            log "LIMIT user=$u limit=$lim active=$n DROP ip=$ip"
+        fi
+    done
+}
+
+# Forget idle (user,ip) pairs; undrop an IP once no active dropped pair needs it.
+prune() {
+    local now key ip k2 other
+    now=$(date +%s)
+    for key in "${!LAST_SEEN[@]}"; do
+        (( now - LAST_SEEN[$key] <= IDLE_TIMEOUT )) && continue
+        if [ -n "${DROPPED[$key]}" ]; then
+            ip="${key#*|}"; other=0
+            for k2 in "${!DROPPED[@]}"; do
+                [ "$k2" = "$key" ] && continue
+                [ "${k2#*|}" = "$ip" ] && { other=1; break; }
+            done
+            (( other == 0 )) && { undrop_ip "$ip"; log "EXPIRE ip=$ip user=${key%%|*} (idle)"; }
+            unset "DROPPED[$key]"
+        fi
+        unset "LAST_SEEN[$key]" "FIRST_SEEN[$key]"
+    done
+    ACTIVE_TOTAL=${#LAST_SEEN[@]}
+}
+
+# Remove every rule we ever added (used at startup and on shutdown).
+flush_our_rules() {
+    local ip
+    iptables-save 2>/dev/null \
+        | grep -- "--comment \"\?${COMMENT_TAG}\"\?" \
+        | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | sort -u \
+        | while read -r ip; do undrop_ip "$ip"; done
+}
+
+trap 'flush_our_rules; exit 0' TERM INT
+
+flush_our_rules
+LAST_PRUNE=$(date +%s)
+write_health starting "daemon started, awaiting udp-custom log lines"
+
+while true; do
+    while true; do
+        if IFS= read -r -t "$TICK" line; then
+            LINES_SEEN=$((LINES_SEEN+1))
+            extract_line "$line"
+            if [ "$KIND" = "conn" ] && [ -n "$USR" ] && [ -n "$IP" ]; then
+                IDS_PARSED=$((IDS_PARSED+1))
+                key="$USR|$IP"; now=$(date +%s)
+                [ -z "${FIRST_SEEN[$key]}" ] && FIRST_SEEN[$key]=$now
+                LAST_SEEN[$key]=$now
+                enforce_user "$USR"
+            fi
+        else
+            (( $? <= 128 )) && break   # EOF: journalctl stream ended
+        fi
+        now=$(date +%s)
+        if (( now - LAST_PRUNE >= TICK )); then
+            prune; LAST_PRUNE=$now
+            if (( CONN_SHAPED > 0 && IDS_PARSED == 0 )); then
+                write_health unparseable "saw $CONN_SHAPED connection-shaped log lines but extracted 0 identities — udp-custom log format not recognized; adjust extract_line() patterns"
+            else
+                write_health active "tracking $ACTIVE_TOTAL source IPs across users; parsed $IDS_PARSED identities from $LINES_SEEN lines"
+            fi
+        fi
+    done < <(journalctl -u udp-custom -n0 -f --no-pager 2>/dev/null)
+    write_health starting "udp-custom log stream ended; retrying in 5s (is udp-custom running?)"
+    sleep 5
+done
+UDPSHAREEOF
+    chmod +x "$UDP_SHARE_ENFORCER_SCRIPT"
+    sed -i 's/\r$//' "$UDP_SHARE_ENFORCER_SCRIPT" 2>/dev/null
+}
+
+enable_udp_share() {
+    mkdir -p "$DB_DIR" 2>/dev/null
+    write_udp_share_enforcer
+    cat > "$UDP_SHARE_ENFORCER_SERVICE" <<EOF
+[Unit]
+Description=VPS_superScript UDP Anti-Sharing Enforcer
+After=network.target udp-custom.service
+
+[Service]
+Type=simple
+User=root
+ExecStart=$UDP_SHARE_ENFORCER_SCRIPT
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload
+    systemctl enable VPS_superScript-udp-share 2>/dev/null
+    systemctl restart VPS_superScript-udp-share 2>/dev/null
+    echo "on" > "$UDP_SHARE_STATE_FILE"
+    if systemctl is-active --quiet VPS_superScript-udp-share; then
+        echo -e "\n${C_GREEN}✅ UDP anti-sharing enforcement ENABLED.${C_RESET}"
+        echo -e "${C_DIM}Watches the udp-custom log and enforces each account's connection limit"
+        echo -e "by source IP. Give it ~15s, then check the health line in this menu — if it"
+        echo -e "reports ${C_RESET}${C_YELLOW}UNPARSEABLE${C_RESET}${C_DIM}, the log format wasn't recognised and nothing is being"
+        echo -e "enforced yet (see the note in the menu).${C_RESET}"
+    else
+        echo -e "\n${C_RED}❌ Enforcer failed to start. Check: journalctl -u VPS_superScript-udp-share${C_RESET}"
+    fi
+}
+
+disable_udp_share() {
+    systemctl stop VPS_superScript-udp-share 2>/dev/null
+    systemctl disable VPS_superScript-udp-share 2>/dev/null
+    rm -f "$UDP_SHARE_ENFORCER_SERVICE" "$UDP_SHARE_ENFORCER_SCRIPT"
+    systemctl daemon-reload 2>/dev/null
+    # Clear any iptables drops this enforcer left behind.
+    while iptables-save 2>/dev/null | grep -q "ffudpshare"; do
+        local line ip
+        line=$(iptables-save 2>/dev/null | grep -m1 "ffudpshare")
+        ip=$(echo "$line" | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -n1)
+        [[ -z "$ip" ]] && break
+        iptables -D INPUT -p udp -s "$ip" -m comment --comment "ffudpshare" -j DROP 2>/dev/null || break
+    done
+    rm -f "$UDP_SHARE_HEALTH_FILE"
+    echo "off" > "$UDP_SHARE_STATE_FILE"
+    echo -e "\n${C_YELLOW}⚠️ UDP anti-sharing enforcement DISABLED. All UDP share-blocks cleared.${C_RESET}"
+}
+
+udp_share_status() {
+    if systemctl is-active --quiet VPS_superScript-udp-share 2>/dev/null; then
+        echo -e "  ${C_GREEN}● Enabled${C_RESET} ${C_DIM}(watching udp-custom log)${C_RESET}"
+    else
+        echo -e "  ${C_RED}● Disabled${C_RESET}"
+    fi
+}
+
+# Read a single field out of the health file (state|updated|lines_seen|
+# ids_parsed|active_ips|note). Echoes empty string when absent.
+udp_share_health_field() {
+    local key="$1" val=""
+    [[ -f "$UDP_SHARE_HEALTH_FILE" ]] || { echo ""; return; }
+    val=$(grep -m1 "^${key}=" "$UDP_SHARE_HEALTH_FILE" 2>/dev/null | cut -d= -f2-)
+    echo "$val"
+}
+
+udp_share_menu() {
+    while true; do
+        clear; show_banner
+        echo -e "${C_BOLD}${C_PURPLE}--- 📡 UDP Anti-Sharing (udp-custom) ---${C_RESET}\n"
+        echo -ne "  Status: "; udp_share_status
+        if systemctl is-active --quiet VPS_superScript-udp-share 2>/dev/null; then
+            local hstate note active ids
+            hstate=$(udp_share_health_field state)
+            note=$(udp_share_health_field note)
+            active=$(udp_share_health_field active_ips)
+            ids=$(udp_share_health_field ids_parsed)
+            case "$hstate" in
+                active)
+                    echo -e "  Health: ${C_GREEN}● ACTIVE${C_RESET} ${C_DIM}(identities parsed: ${ids:-0}, IPs blocked now: ${active:-0})${C_RESET}" ;;
+                unparseable)
+                    echo -e "  Health: ${C_RED}● UNPARSEABLE — NOT ENFORCING${C_RESET}"
+                    echo -e "  ${C_YELLOW}The udp-custom log is being read, but no user identity could be parsed"
+                    echo -e "  out of it, so no limit is being applied. This is expected until the log"
+                    echo -e "  format is confirmed. ${C_RESET}${C_DIM}${note}${C_RESET}" ;;
+                starting|"")
+                    echo -e "  Health: ${C_YELLOW}● STARTING${C_RESET} ${C_DIM}${note}${C_RESET}" ;;
+                *)
+                    echo -e "  Health: ${C_DIM}${hstate} ${note}${C_RESET}" ;;
+            esac
+        fi
+        echo -e "\n  ${C_DIM}How it works: UDP has no connection to count, so this reads udp-custom's"
+        echo -e "  own log, ties each source IP to the account that authenticated, and drops"
+        echo -e "  the newest IPs once an account exceeds its ${C_RESET}${C_CYAN}connection limit${C_RESET}${C_DIM} (set when you"
+        echo -e "  create the account). It ${C_RESET}${C_BOLD}cannot${C_RESET}${C_DIM} tell two devices behind one NAT/IP apart,"
+        echo -e "  and it enforces nothing if the log can't be parsed — the health line above"
+        echo -e "  tells you which. Pair it with ${C_RESET}${C_CYAN}one account per device${C_RESET}${C_DIM} for real control.${C_RESET}\n"
+        printf "  ${C_GREEN}[ 1]${C_RESET} %-40s\n" "✅ Enable enforcement"
+        printf "  ${C_GREEN}[ 2]${C_RESET} %-40s\n" "🛑 Disable enforcement"
+        printf "  ${C_GREEN}[ 3]${C_RESET} %-40s\n" "📜 View recent activity log"
+        printf "  ${C_GREEN}[ 4]${C_RESET} %-40s\n" "🩺 View raw health state"
+        echo -e "\n  ${C_RED}[ 0]${C_RESET} ⬅️  Back"
+        echo
+        read -r -p "👉 Enter your choice: " uc || return
+        case $uc in
+            1) enable_udp_share; press_enter ;;
+            2) disable_udp_share; press_enter ;;
+            3) if [[ -f "$UDP_SHARE_LOG" ]]; then
+                   echo; tail -n 30 "$UDP_SHARE_LOG" 2>/dev/null
+               else echo -e "\n${C_YELLOW}ℹ️ No UDP anti-sharing activity logged yet.${C_RESET}"; fi
+               press_enter ;;
+            4) if [[ -f "$UDP_SHARE_HEALTH_FILE" ]]; then
+                   echo; cat "$UDP_SHARE_HEALTH_FILE" 2>/dev/null
+               else echo -e "\n${C_YELLOW}ℹ️ No health state written yet (enforcer not started?).${C_RESET}"; fi
                press_enter ;;
             0) return ;;
             *) invalid_option ;;
@@ -5830,8 +6223,10 @@ protocol_menu() {
         printf "     ${C_CHOICE}[12]${C_RESET} %-45s %s\n" "🛡️ Install ZiVPN (UDP 5667)" "$zivpn_status"
         printf "     ${C_CHOICE}[13]${C_RESET} %-45s\n" "🗑️ Uninstall ZiVPN"
         local hwid_status; if systemctl is-active --quiet VPS_superScript-hwid-enforcer 2>/dev/null; then hwid_status="${C_STATUS_A}(On)${C_RESET}"; else hwid_status="${C_STATUS_I}(Off)${C_RESET}"; fi
+        local udpshare_status; if systemctl is-active --quiet VPS_superScript-udp-share 2>/dev/null; then udpshare_status="${C_STATUS_A}(On)${C_RESET}"; else udpshare_status="${C_STATUS_I}(Off)${C_RESET}"; fi
         printf "     ${C_CHOICE}[14]${C_RESET} %-45s %s\n" "🔒 HWID Lock (udp-custom + ZiVPN + SlowUDP + UDP-Req)" "$hwid_status"
         printf "     ${C_CHOICE}[15]${C_RESET} %-45s\n" "🚀 Exclude Ports (udp-custom / DNSTT toggle)"
+        printf "     ${C_CHOICE}[18]${C_RESET} %-45s %s\n" "🚦 UDP Anti-Sharing (udp-custom connection limit)" "$udpshare_status"
         
         echo -e "     ${C_ACCENT}--- NEW PROTOCOLS ---${C_RESET}"
         printf "     ${C_CHOICE}[20]${C_RESET} %-45s %s\n" "🦘 Install Dropbear (109, 143)" "$dropbear_status"
@@ -5883,6 +6278,7 @@ protocol_menu() {
             14) hwid_lock_menu ;;
             15) manage_udp_custom_exclude; press_enter ;;
             16) install_panel_menu; press_enter ;; 17) uninstall_xui_panel; press_enter ;;
+            18) udp_share_menu ;;
             20) install_dropbear; press_enter ;; 21) uninstall_dropbear; press_enter ;;
             22) install_openvpn; press_enter ;; 23) uninstall_openvpn; press_enter ;;
             24) install_wireguard; press_enter ;; 25) uninstall_wireguard; press_enter ;;
@@ -6011,6 +6407,17 @@ uninstall_script() {
     systemctl disable VPS_superScript-hwid-enforcer &>/dev/null
     rm -f "$HWID_ENFORCER_SERVICE" "$HWID_ENFORCER_SCRIPT"
     _hwid_flush_drops
+
+    echo -e "\n${C_BLUE}🗑️ Removing UDP anti-sharing enforcer...${C_RESET}"
+    systemctl stop VPS_superScript-udp-share &>/dev/null
+    systemctl disable VPS_superScript-udp-share &>/dev/null
+    rm -f "$UDP_SHARE_ENFORCER_SERVICE" "$UDP_SHARE_ENFORCER_SCRIPT"
+    while iptables-save 2>/dev/null | grep -q "ffudpshare"; do
+        line=$(iptables-save 2>/dev/null | grep -m1 "ffudpshare")
+        ip=$(echo "$line" | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -n1)
+        [[ -z "$ip" ]] && break
+        iptables -D INPUT -p udp -s "$ip" -m comment --comment "ffudpshare" -j DROP 2>/dev/null || break
+    done
     
     echo -e "\n${C_BLUE}🔄 Reloading systemd daemon...${C_RESET}"
     systemctl daemon-reload

@@ -55,7 +55,8 @@ Easily spin up entire tunneling infrastructures onto your server without touchin
 
 ### 📊 Advanced Quotas & Network Safety
 * **Strict Bandwidth Limiting:** Assign gigabyte allowances (e.g., 50GB) upon creation. Background services will safely and automatically lock users who exceed their usage.
-* **Active Connection Limits:** Ensure nobody shares their account by enforcing strict concurrent session limits. 
+* **Active Connection Limits:** Curb account sharing by enforcing per-account concurrent session limits — the most reliable way to stop one account being used on many devices at once. *(Session counting is strongest on SSH; pair it with one account per device for dependable control.)*
+* **Device Locking (HWID):** Optionally pin an account to specific device IDs. Enforcement is **best-effort and reactive** — it reads the VPN service logs and can only verify a device when the protocol actually reports one, so it **cannot** stop a decrypted or shared config on protocols that don't. The secure default drops strict connections it can't verify; see the in-menu notes. For dependable device control, rely on connection limits + per-device accounts rather than HWID alone.
 * **Live Traffic Monitor:** Check high-speed Bash network tracking (or install `vnstat` for persistent metrics).
 * **Content Filtering:** Block torrent traffic and adult content with iptables string matching — no extra dependencies.
 * **Custom Blocklists:** Add your own domains and keywords to the content filter with a simple config file.
