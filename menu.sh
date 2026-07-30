@@ -9325,7 +9325,12 @@ timezone_menu() {
     printf "  ${C_CHOICE}[ 5]${C_RESET} %-30s\n" "🇸🇬 Asia/Singapore"
     printf "  ${C_CHOICE}[ 6]${C_RESET} %-30s\n" "🇯🇵 Asia/Tokyo"
     printf "  ${C_CHOICE}[ 7]${C_RESET} %-30s\n" "🇮🇩 Asia/Jakarta"
-    printf "  ${C_CHOICE}[ 8]${C_RESET} %-30s\n" "✏️ Enter Custom Timezone"
+    printf "  ${C_CHOICE}[ 8]${C_RESET} %-30s\n" "🇬🇭 Africa/Accra (Ghana, GMT)"
+    printf "  ${C_CHOICE}[ 9]${C_RESET} %-30s\n" "🇳🇬 Africa/Lagos (WAT, GMT+1)"
+    printf "  ${C_CHOICE}[10]${C_RESET} %-30s\n" "🇰🇪 Africa/Nairobi (EAT, GMT+3)"
+    printf "  ${C_CHOICE}[11]${C_RESET} %-30s\n" "🇿🇦 Africa/Johannesburg (SAST)"
+    printf "  ${C_CHOICE}[12]${C_RESET} %-30s\n" "🇪🇬 Africa/Cairo (EET)"
+    printf "  ${C_CHOICE}[13]${C_RESET} %-30s\n" "✏️ Enter Custom Timezone"
     echo -e "\n  ${C_WARN}[ 0]${C_RESET} ↩️ Return"
     echo
     read -p "👉 Select timezone: " tz_choice
@@ -9337,7 +9342,12 @@ timezone_menu() {
         5) timedatectl set-timezone Asia/Singapore ;;
         6) timedatectl set-timezone Asia/Tokyo ;;
         7) timedatectl set-timezone Asia/Jakarta ;;
-        8) read -p "👉 Enter timezone (e.g., Asia/Manila): " custom_tz; timedatectl set-timezone "$custom_tz" 2>/dev/null || echo -e "${C_RED}❌ Invalid.${C_RESET}" ;;
+        8) timedatectl set-timezone Africa/Accra ;;
+        9) timedatectl set-timezone Africa/Lagos ;;
+        10) timedatectl set-timezone Africa/Nairobi ;;
+        11) timedatectl set-timezone Africa/Johannesburg ;;
+        12) timedatectl set-timezone Africa/Cairo ;;
+        13) read -p "👉 Enter timezone (e.g., Africa/Accra): " custom_tz; timedatectl set-timezone "$custom_tz" 2>/dev/null || echo -e "${C_RED}❌ Invalid.${C_RESET}" ;;
         0) return ;;
         *) invalid_option ;;
     esac
