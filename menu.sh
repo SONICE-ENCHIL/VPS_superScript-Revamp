@@ -1604,11 +1604,12 @@ sync_runtime_components_if_needed() {
     fi
     # Re-arm UDP anti-sharing enforcement across an upgrade/re-setup.
     if [[ "$(cat "$UDP_SHARE_STATE_FILE" 2>/dev/null)" == "on" ]]; then
+        local udpshare_marker="# VPS_superScript udp-share enforcer version 2026-07-30.2"
         if ! systemctl is-active --quiet VPS_superScript-udp-share 2>/dev/null; then
             enable_udp_share >/dev/null 2>&1
-        else
-            # Refresh the daemon script in place and restart so any parser
-            # updates take effect.
+        elif ! grep -Fq "$udpshare_marker" "$UDP_SHARE_ENFORCER_SCRIPT" 2>/dev/null; then
+            # Older build: naive IP counter with unscoped UDP drops. Rewrite with
+            # the overlap-detection + account-action daemon and restart.
             write_udp_share_enforcer
             systemctl restart VPS_superScript-udp-share 2>/dev/null
         fi
@@ -5241,15 +5242,34 @@ hwid_lock_menu() {
 write_udp_share_enforcer() {
     cat > "$UDP_SHARE_ENFORCER_SCRIPT" <<'UDPSHAREEOF'
 #!/bin/bash
-# VPS_superScript udp-share enforcer version 2026-07-29.1
+# VPS_superScript udp-share enforcer version 2026-07-30.2
 # Per-user concurrent source-IP limiter for udp-custom.
 #
 # WHY THIS EXISTS: UDP is connectionless and udp-custom runs as root, so there
 # is no per-user process to count or kill (unlike SSH). The only identity signal
-# is udp-custom's own auth log. This daemon tails that log, maps each accepted
-# connection to (user -> source IP), expires idle IPs, and when a user is seen
-# from more distinct IPs than their per-account limit it DROPS the newest
-# offending source IPs (tagged with an iptables comment for clean removal).
+# is udp-custom's own auth log. This daemon tails that log and maps each
+# accepted connection to (user -> source IP).
+#
+# WHY IT IS NOT A NAIVE IP COUNTER: on mobile carriers (the common case for
+# injector-app users) two things break simple counting:
+#   1. Carrier NAT puts many subscribers behind one public IP, so genuine
+#      sharing between two users on the same carrier can look like ONE IP.
+#   2. A single phone's IP rotates on handover/reconnect, so one honest user
+#      can look like TWO IPs within seconds.
+# Counting distinct IPs punishes (2) while missing (1). So instead we look for
+# SUSTAINED OVERLAP: after a rotation the old IP goes silent, whereas real
+# sharing keeps both IPs re-authenticating in an interleaved pattern. An IP only
+# counts once it is "established" (>= MIN_HITS auth events) and "live" (seen
+# within OVERLAP_WINDOW), and a user must stay over their limit for
+# STRIKES_NEEDED consecutive checks before we act. Rotation therefore decays to
+# zero strikes on its own.
+#
+# WHY IT ACTS ON THE ACCOUNT, NOT THE IP: under carrier NAT, DROPping an IP
+# punishes every other customer behind that same address. So the default action
+# is a temporary shadow lock on the offending ACCOUNT (blocks udp-custom
+# re-auth) plus a conntrack flush of only that user's own flows. IP-level DROP
+# is available as an opt-in fallback and is scoped to the udp-custom port so it
+# can never break DNS or unrelated UDP.
 #
 # FAIL-VISIBLE: udp-custom's exact log vocabulary can vary by build. If the
 # daemon sees connection-shaped lines but cannot extract identities, it records
@@ -5258,9 +5278,16 @@ write_udp_share_enforcer() {
 export LC_ALL=C.UTF-8 LANG=C.UTF-8
 DB_FILE="/etc/VPS_superScript/users.db"
 HEALTH_FILE="/etc/VPS_superScript/udp_share.health"
+LOCK_STATE="/etc/VPS_superScript/udp_share.locks"
 LOG_FILE="/var/log/VPS_superScript_udp_share.log"
-IDLE_TIMEOUT=120          # seconds before an idle source IP is forgotten
-DEFAULT_LIMIT=1           # used if a user has no numeric limit in users.db
+LISTEN_PORT="__LISTEN_PORT__"   # substituted by enable_udp_share
+IDLE_TIMEOUT=300          # seconds before an idle source IP is forgotten
+OVERLAP_WINDOW=90         # an IP counts as "live" only if seen within this
+MIN_HITS=2                # auth events before an IP counts as established
+STRIKES_NEEDED=3          # consecutive over-limit checks before acting
+DEFAULT_LIMIT=2           # mobile IPs rotate; 1 is too tight as a default
+COOLDOWN=600              # seconds an auto-locked account stays locked
+ACTION="lock"             # lock | drop | warn
 COMMENT_TAG="ffudpshare"  # iptables comment so we can find/remove only our rules
 TICK=15                   # maintenance wakeup interval (prune + health) in seconds
 HEALTH_TMP="${HEALTH_FILE}.tmp"
@@ -5278,18 +5305,72 @@ user_limit() {
     echo "$lim"
 }
 
+# IP-level DROP is the opt-in fallback action only. It is scoped to the
+# udp-custom listen port: an unscoped "-p udp -s IP" DROP would also kill DNS
+# and every other UDP service for everyone behind a carrier-NAT address.
 drop_ip() {
     local ip="$1"
-    iptables -C INPUT -p udp -s "$ip" -m comment --comment "$COMMENT_TAG" -j DROP 2>/dev/null && return 0
-    iptables -I INPUT -p udp -s "$ip" -m comment --comment "$COMMENT_TAG" -j DROP 2>/dev/null
-    command -v conntrack >/dev/null 2>&1 && conntrack -D -p udp -s "$ip" >/dev/null 2>&1
+    [ -z "$LISTEN_PORT" ] && { log "SKIP drop ip=$ip (no listen port known)"; return 1; }
+    iptables -C INPUT -p udp -s "$ip" --dport "$LISTEN_PORT" -m comment --comment "$COMMENT_TAG" -j DROP 2>/dev/null && return 0
+    iptables -I INPUT -p udp -s "$ip" --dport "$LISTEN_PORT" -m comment --comment "$COMMENT_TAG" -j DROP 2>/dev/null
+    command -v conntrack >/dev/null 2>&1 && conntrack -D -p udp -s "$ip" --dport "$LISTEN_PORT" >/dev/null 2>&1
 }
 
 undrop_ip() {
     local ip="$1"
-    while iptables -C INPUT -p udp -s "$ip" -m comment --comment "$COMMENT_TAG" -j DROP 2>/dev/null; do
-        iptables -D INPUT -p udp -s "$ip" -m comment --comment "$COMMENT_TAG" -j DROP 2>/dev/null || break
+    [ -z "$LISTEN_PORT" ] && return 0
+    while iptables -C INPUT -p udp -s "$ip" --dport "$LISTEN_PORT" -m comment --comment "$COMMENT_TAG" -j DROP 2>/dev/null; do
+        iptables -D INPUT -p udp -s "$ip" --dport "$LISTEN_PORT" -m comment --comment "$COMMENT_TAG" -j DROP 2>/dev/null || break
     done
+}
+
+# Temporarily shadow-lock the offending ACCOUNT. This is the default action:
+# it targets the person actually sharing instead of an address that may be
+# shared by unrelated customers. Only ever applied to accounts present in
+# users.db, so system accounts can never be touched. Recorded in LOCK_STATE so
+# a daemon restart still releases the lock.
+lock_account() {
+    local u="$1" now="$2"
+    grep -q "^${u}:" "$DB_FILE" 2>/dev/null || { log "REFUSE lock user=$u (not in users.db)"; return 1; }
+    passwd -S "$u" 2>/dev/null | awk '{print $2}' | grep -q '^L' && return 0
+    usermod -L "$u" 2>/dev/null || return 1
+    echo "$u $now" >> "$LOCK_STATE"
+    # Kill this user's live UDP flows so the lock bites immediately rather than
+    # only at their next re-auth.
+    if command -v conntrack >/dev/null 2>&1; then
+        local key ip
+        for key in "${!LAST_SEEN[@]}"; do
+            [ "${key%%|*}" = "$u" ] || continue
+            ip="${key#*|}"
+            [ -n "$LISTEN_PORT" ] && conntrack -D -p udp -s "$ip" --dport "$LISTEN_PORT" >/dev/null 2>&1
+        done
+    fi
+    return 0
+}
+
+unlock_account() {
+    local u="$1"
+    grep -q "^${u}:" "$DB_FILE" 2>/dev/null || return 1
+    usermod -U "$u" 2>/dev/null
+    if [ -f "$LOCK_STATE" ]; then
+        grep -v "^${u} " "$LOCK_STATE" > "${LOCK_STATE}.tmp" 2>/dev/null \
+            && mv "${LOCK_STATE}.tmp" "$LOCK_STATE" 2>/dev/null
+    fi
+}
+
+# Release any auto-lock whose cooldown has elapsed.
+release_expired_locks() {
+    local now u ts
+    [ -f "$LOCK_STATE" ] || return 0
+    now=$(date +%s)
+    while read -r u ts; do
+        [ -z "$u" ] && continue
+        [[ "$ts" =~ ^[0-9]+$ ]] || ts=0
+        if (( now - ts >= COOLDOWN )); then
+            unlock_account "$u"
+            log "RELEASE user=$u (cooldown elapsed)"
+        fi
+    done < "$LOCK_STATE"
 }
 
 # Health states: starting | active | unparseable
@@ -5301,17 +5382,23 @@ write_health() {
       echo "lines_seen=$LINES_SEEN"
       echo "ids_parsed=$IDS_PARSED"
       echo "active_ips=$ACTIVE_TOTAL"
+      echo "violations=$VIOLATIONS"
+      echo "action=$ACTION"
       echo "note=$note"
     } > "$HEALTH_TMP" 2>/dev/null && mv "$HEALTH_TMP" "$HEALTH_FILE" 2>/dev/null
 }
 
 declare -A LAST_SEEN      # "user|ip" -> epoch last seen
-declare -A FIRST_SEEN     # "user|ip" -> epoch first seen (oldest kept, newest dropped)
+declare -A FIRST_SEEN     # "user|ip" -> epoch first seen
+declare -A HITS           # "user|ip" -> auth-event count (established >= MIN_HITS)
 declare -A DROPPED        # "user|ip" -> 1 if we have an iptables DROP for it
+declare -A STRIKES        # user -> consecutive over-limit checks
+declare -A ACTED          # user -> epoch we last acted, suppresses repeat action
 LINES_SEEN=0              # total log lines read
 CONN_SHAPED=0            # lines that looked like a connect/auth event
 IDS_PARSED=0             # connect-shaped lines we extracted user+ip from
 ACTIVE_TOTAL=0           # distinct active (user,ip) pairs
+VIOLATIONS=0             # users we have acted on since start
 
 # Extraction — adjust to match your udp-custom build's log vocabulary.
 # Sets KIND=conn plus USR and IP when a connection-shaped line is parsed.
@@ -5326,32 +5413,81 @@ extract_line() {
     [ -z "$USR" ] && USR=$(printf '%s' "$line" | grep -oiP '(?:\bfor[[:space:]]+)\K[A-Za-z0-9._-]+' | head -n1)
 }
 
-# When a user is seen from more distinct IPs than their limit, keep the oldest
-# $limit source IPs and DROP the newer ones.
-enforce_user() {
-    local u="$1" lim key ip first entry i n
-    lim=$(user_limit "$u")
-    local ips=()
+# Count a user's ESTABLISHED + LIVE source IPs. "Established" (>= MIN_HITS auth
+# events) filters one-off rotation artefacts; "live" (seen within
+# OVERLAP_WINDOW) means a rotated-away IP stops counting quickly even though we
+# keep it in LAST_SEEN until IDLE_TIMEOUT for logging.
+live_ip_count() {
+    local u="$1" now="$2" key n=0
     for key in "${!LAST_SEEN[@]}"; do
         [ "${key%%|*}" = "$u" ] || continue
-        first="${FIRST_SEEN[$key]:-${LAST_SEEN[$key]}}"
-        ips+=("$first|$key")
+        (( ${HITS[$key]:-0} >= MIN_HITS )) || continue
+        (( now - LAST_SEEN[$key] <= OVERLAP_WINDOW )) || continue
+        n=$((n+1))
     done
-    n=${#ips[@]}
-    (( n <= lim )) && return
-    local sorted=()
-    while IFS= read -r entry; do sorted+=("$entry"); done < <(printf '%s\n' "${ips[@]}" | sort -t'|' -k1,1n)
-    i=0
-    for entry in "${sorted[@]}"; do
-        i=$((i+1))
-        (( i <= lim )) && continue
-        key="${entry#*|}"; ip="${key#*|}"
-        if [ -z "${DROPPED[$key]}" ]; then
-            drop_ip "$ip"
-            DROPPED[$key]=1
-            log "LIMIT user=$u limit=$lim active=$n DROP ip=$ip"
-        fi
-    done
+    echo "$n"
+}
+
+# Decide whether a user is really sharing, and act if so. A user must exceed
+# their limit on STRIKES_NEEDED consecutive checks; a single check back under
+# the limit resets the count, so IP rotation never accumulates strikes.
+enforce_user() {
+    local u="$1" now lim n
+    now=$(date +%s)
+    lim=$(user_limit "$u")
+    n=$(live_ip_count "$u" "$now")
+
+    if (( n <= lim )); then
+        [ -n "${STRIKES[$u]}" ] && unset "STRIKES[$u]"
+        return
+    fi
+
+    STRIKES[$u]=$(( ${STRIKES[$u]:-0} + 1 ))
+    (( STRIKES[$u] < STRIKES_NEEDED )) && {
+        log "WATCH user=$u limit=$lim live_ips=$n strike=${STRIKES[$u]}/$STRIKES_NEEDED"
+        return
+    }
+
+    # Already acted on this user recently — let the cooldown run its course.
+    (( now - ${ACTED[$u]:-0} < COOLDOWN )) && return
+
+    ACTED[$u]=$now
+    VIOLATIONS=$((VIOLATIONS+1))
+    case "$ACTION" in
+        lock)
+            if lock_account "$u" "$now"; then
+                log "SHARING user=$u limit=$lim live_ips=$n -> ACCOUNT LOCKED ${COOLDOWN}s"
+            else
+                log "SHARING user=$u limit=$lim live_ips=$n -> lock FAILED"
+            fi
+            ;;
+        drop)
+            # Fallback: drop the newest established IPs, keeping the oldest $lim.
+            local key ip first entry i=0
+            local ips=()
+            for key in "${!LAST_SEEN[@]}"; do
+                [ "${key%%|*}" = "$u" ] || continue
+                (( ${HITS[$key]:-0} >= MIN_HITS )) || continue
+                (( now - LAST_SEEN[$key] <= OVERLAP_WINDOW )) || continue
+                first="${FIRST_SEEN[$key]:-${LAST_SEEN[$key]}}"
+                ips+=("$first|$key")
+            done
+            local sorted=()
+            while IFS= read -r entry; do sorted+=("$entry"); done \
+                < <(printf '%s\n' "${ips[@]}" | sort -t'|' -k1,1n)
+            for entry in "${sorted[@]}"; do
+                i=$((i+1))
+                (( i <= lim )) && continue
+                key="${entry#*|}"; ip="${key#*|}"
+                [ -n "${DROPPED[$key]}" ] && continue
+                drop_ip "$ip" && DROPPED[$key]=1
+                log "SHARING user=$u limit=$lim live_ips=$n -> DROP ip=$ip (port $LISTEN_PORT)"
+            done
+            ;;
+        *)
+            log "SHARING user=$u limit=$lim live_ips=$n -> WARN only (no action taken)"
+            ;;
+    esac
 }
 
 # Forget idle (user,ip) pairs; undrop an IP once no active dropped pair needs it.
@@ -5369,23 +5505,41 @@ prune() {
             (( other == 0 )) && { undrop_ip "$ip"; log "EXPIRE ip=$ip user=${key%%|*} (idle)"; }
             unset "DROPPED[$key]"
         fi
-        unset "LAST_SEEN[$key]" "FIRST_SEEN[$key]"
+        unset "LAST_SEEN[$key]" "FIRST_SEEN[$key]" "HITS[$key]"
     done
     ACTIVE_TOTAL=${#LAST_SEEN[@]}
+    release_expired_locks
 }
 
-# Remove every rule we ever added (used at startup and on shutdown).
+# Remove every rule we ever added (used at startup and on shutdown). Deletes by
+# rule NUMBER rather than by matching the rule form, so it also clears unscoped
+# rules left behind by an older build of this daemon on upgrade.
 flush_our_rules() {
-    local ip
-    iptables-save 2>/dev/null \
-        | grep -- "--comment \"\?${COMMENT_TAG}\"\?" \
-        | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | sort -u \
-        | while read -r ip; do undrop_ip "$ip"; done
+    local rulenum
+    while true; do
+        rulenum=$(iptables -L INPUT --line-numbers -n 2>/dev/null \
+            | grep "$COMMENT_TAG" | head -n1 | awk '{print $1}')
+        [ -z "$rulenum" ] && break
+        iptables -D INPUT "$rulenum" 2>/dev/null || break
+    done
 }
 
-trap 'flush_our_rules; exit 0' TERM INT
+# On shutdown, release every account we auto-locked. Leaving a paying user
+# locked because the daemon stopped would be worse than not enforcing at all.
+release_all_locks() {
+    local u ts
+    [ -f "$LOCK_STATE" ] || return 0
+    while read -r u ts; do
+        [ -n "$u" ] && unlock_account "$u"
+    done < "$LOCK_STATE"
+    : > "$LOCK_STATE"
+}
+
+trap 'flush_our_rules; release_all_locks; exit 0' TERM INT
 
 flush_our_rules
+release_all_locks   # clear anything left behind by an unclean previous exit
+touch "$LOCK_STATE" 2>/dev/null; chmod 600 "$LOCK_STATE" 2>/dev/null
 LAST_PRUNE=$(date +%s)
 write_health starting "daemon started, awaiting udp-custom log lines"
 
@@ -5399,6 +5553,7 @@ while true; do
                 key="$USR|$IP"; now=$(date +%s)
                 [ -z "${FIRST_SEEN[$key]}" ] && FIRST_SEEN[$key]=$now
                 LAST_SEEN[$key]=$now
+                HITS[$key]=$(( ${HITS[$key]:-0} + 1 ))
                 enforce_user "$USR"
             fi
         else
@@ -5410,7 +5565,7 @@ while true; do
             if (( CONN_SHAPED > 0 && IDS_PARSED == 0 )); then
                 write_health unparseable "saw $CONN_SHAPED connection-shaped log lines but extracted 0 identities — udp-custom log format not recognized; adjust extract_line() patterns"
             else
-                write_health active "tracking $ACTIVE_TOTAL source IPs across users; parsed $IDS_PARSED identities from $LINES_SEEN lines"
+                write_health active "tracking $ACTIVE_TOTAL source IPs; parsed $IDS_PARSED identities from $LINES_SEEN lines; acted on $VIOLATIONS users (action=$ACTION)"
             fi
         fi
     done < <(journalctl -u udp-custom -n0 -f --no-pager 2>/dev/null)
@@ -5418,6 +5573,8 @@ while true; do
     sleep 5
 done
 UDPSHAREEOF
+    # Bake in the real udp-custom listen port so IP drops can be scoped to it.
+    sed -i "s|__LISTEN_PORT__|${UDP_CUSTOM_LISTEN_PORT}|" "$UDP_SHARE_ENFORCER_SCRIPT" 2>/dev/null
     chmod +x "$UDP_SHARE_ENFORCER_SCRIPT"
     sed -i 's/\r$//' "$UDP_SHARE_ENFORCER_SCRIPT" 2>/dev/null
 }
@@ -5460,14 +5617,23 @@ disable_udp_share() {
     systemctl disable VPS_superScript-udp-share 2>/dev/null
     rm -f "$UDP_SHARE_ENFORCER_SERVICE" "$UDP_SHARE_ENFORCER_SCRIPT"
     systemctl daemon-reload 2>/dev/null
-    # Clear any iptables drops this enforcer left behind.
-    while iptables-save 2>/dev/null | grep -q "ffudpshare"; do
-        local line ip
-        line=$(iptables-save 2>/dev/null | grep -m1 "ffudpshare")
-        ip=$(echo "$line" | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -n1)
-        [[ -z "$ip" ]] && break
-        iptables -D INPUT -p udp -s "$ip" -m comment --comment "ffudpshare" -j DROP 2>/dev/null || break
+    # Clear any iptables drops this enforcer left behind. Rules are matched by
+    # their comment tag and deleted by rule number, so this works regardless of
+    # which rule form (scoped or not) an older build inserted.
+    local rulenum
+    while true; do
+        rulenum=$(iptables -L INPUT --line-numbers -n 2>/dev/null | grep "ffudpshare" | head -n1 | awk '{print $1}')
+        [[ -z "$rulenum" ]] && break
+        iptables -D INPUT "$rulenum" 2>/dev/null || break
     done
+    # Release any account this enforcer auto-locked for sharing.
+    if [[ -f "$DB_DIR/udp_share.locks" ]]; then
+        local _lu _lts
+        while read -r _lu _lts; do
+            [[ -n "$_lu" ]] && usermod -U "$_lu" 2>/dev/null
+        done < "$DB_DIR/udp_share.locks"
+        rm -f "$DB_DIR/udp_share.locks"
+    fi
     rm -f "$UDP_SHARE_HEALTH_FILE"
     echo "off" > "$UDP_SHARE_STATE_FILE"
     echo -e "\n${C_YELLOW}⚠️ UDP anti-sharing enforcement DISABLED. All UDP share-blocks cleared.${C_RESET}"
@@ -6412,12 +6578,17 @@ uninstall_script() {
     systemctl stop VPS_superScript-udp-share &>/dev/null
     systemctl disable VPS_superScript-udp-share &>/dev/null
     rm -f "$UDP_SHARE_ENFORCER_SERVICE" "$UDP_SHARE_ENFORCER_SCRIPT"
-    while iptables-save 2>/dev/null | grep -q "ffudpshare"; do
-        line=$(iptables-save 2>/dev/null | grep -m1 "ffudpshare")
-        ip=$(echo "$line" | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -n1)
-        [[ -z "$ip" ]] && break
-        iptables -D INPUT -p udp -s "$ip" -m comment --comment "ffudpshare" -j DROP 2>/dev/null || break
+    while true; do
+        _ushare_rn=$(iptables -L INPUT --line-numbers -n 2>/dev/null | grep "ffudpshare" | head -n1 | awk '{print $1}')
+        [[ -z "$_ushare_rn" ]] && break
+        iptables -D INPUT "$_ushare_rn" 2>/dev/null || break
     done
+    if [[ -f "$DB_DIR/udp_share.locks" ]]; then
+        while read -r _lu _lts; do
+            [[ -n "$_lu" ]] && usermod -U "$_lu" 2>/dev/null
+        done < "$DB_DIR/udp_share.locks"
+        rm -f "$DB_DIR/udp_share.locks"
+    fi
     
     echo -e "\n${C_BLUE}🔄 Reloading systemd daemon...${C_RESET}"
     systemctl daemon-reload
