@@ -52,6 +52,9 @@ DNSTT_CONFIG_FILE="$DB_DIR/dnstt_info.conf"
 UDP_CUSTOM_DIR="/root/udp"
 UDP_CUSTOM_SERVICE_FILE="/etc/systemd/system/udp-custom.service"
 UDPGW_BINARY="/usr/local/bin/udpgw"
+# Separate copy for badvpn. Same program as udpgw, but kept at its own path so
+# uninstalling udp-custom cannot delete the binary badvpn's service runs.
+BADVPN_BINARY="/usr/local/bin/badvpn-udpgw"
 UDPGW_SERVICE_FILE="/etc/systemd/system/udpgw.service"
 SSH_BANNER_FILE="/etc/bannerssh"
 FALCONPROXY_SERVICE_FILE="/etc/systemd/system/falconproxy.service"
@@ -3700,6 +3703,30 @@ install_badvpn() {
         return
     fi
     check_and_open_firewall_port 7300 udp || return
+
+    local badvpn_binary=""
+    # Prefer the prebuilt binary. badvpn-udpgw and the udpgw helper that
+    # install_udp_custom fetches are the same program — only the --listen-addr
+    # differs — so on x86_64 there is no reason to compile at all. Upstream
+    # (ambrop72/badvpn) has been archived since Aug 2021 and its CMakeLists
+    # predates CMake 4, so the source build now needs a policy override and
+    # will keep rotting. Compiling stays as the fallback for other arches.
+    local arch; arch=$(uname -m 2>/dev/null || echo "unknown")
+    if [[ "$arch" == "x86_64" ]]; then
+        echo -e "\n${C_GREEN}📥 Fetching prebuilt udpgw binary...${C_RESET}"
+        # Deliberately a separate path from $UDPGW_BINARY: uninstall_udp_custom
+        # does `rm -f "$UDPGW_BINARY"`, so sharing one file would let removing
+        # udp-custom silently break the badvpn service the user never touched.
+        if ff_fetch_binary "$BADVPN_BINARY" "https://raw.githubusercontent.com/http-custom/udp-custom/main/module/udpgw"; then
+            chmod +x "$BADVPN_BINARY"
+            badvpn_binary="$BADVPN_BINARY"
+            echo -e "${C_GREEN}✅ Using prebuilt binary — no compilation needed.${C_RESET}"
+        else
+            echo -e "${C_YELLOW}⚠️ Prebuilt download failed; falling back to building from source.${C_RESET}"
+        fi
+    fi
+
+    if [[ -z "$badvpn_binary" ]]; then
     echo -e "\n${C_GREEN}🔄 Updating package lists...${C_RESET}"
     ff_apt_update || return
     echo -e "\n${C_GREEN}📦 Installing all required packages...${C_RESET}"
@@ -3734,7 +3761,6 @@ install_badvpn() {
     echo -e "\n${C_GREEN}🛠️ Compiling source...${C_RESET}"
     ( cd "$BADVPN_BUILD_DIR" && make ) || {
         echo -e "${C_RED}❌ Compilation (make) failed.${C_RESET}"; rm -rf "$BADVPN_BUILD_DIR"; return; }
-    local badvpn_binary
     badvpn_binary=$(find "$BADVPN_BUILD_DIR" -name "badvpn-udpgw" -type f | head -n 1)
     if [[ -z "$badvpn_binary" || ! -f "$badvpn_binary" ]]; then
         echo -e "${C_RED}❌ ERROR: Could not find the compiled 'badvpn-udpgw' binary after compilation.${C_RESET}"
@@ -3743,6 +3769,8 @@ install_badvpn() {
     fi
     echo -e "${C_GREEN}ℹ️ Found binary at: $badvpn_binary${C_RESET}"
     chmod +x "$badvpn_binary"
+    fi   # end source-build fallback
+
     echo -e "\n${C_GREEN}📝 Creating systemd service file...${C_RESET}"
     cat > "$BADVPN_SERVICE_FILE" <<-EOF
 [Unit]
@@ -3784,7 +3812,8 @@ uninstall_badvpn() {
     echo -e "${C_GREEN}🗑️ Removing systemd service file...${C_RESET}"
     rm -f "$BADVPN_SERVICE_FILE"
     systemctl daemon-reload
-    echo -e "${C_GREEN}🗑️ Removing badvpn build directory...${C_RESET}"
+    echo -e "${C_GREEN}🗑️ Removing badvpn binary and build directory...${C_RESET}"
+    rm -f "$BADVPN_BINARY"
     rm -rf "$BADVPN_BUILD_DIR"
     echo -e "${C_GREEN}✅ badvpn has been uninstalled successfully.${C_RESET}"
 }
@@ -6892,6 +6921,7 @@ uninstall_script() {
     systemctl daemon-reload
     
     echo -e "\n${C_BLUE}🗑️ Removing script and configuration files...${C_RESET}"
+    rm -f "$BADVPN_BINARY"
     rm -rf "$BADVPN_BUILD_DIR"
     rm -rf "$UDP_CUSTOM_DIR"
     # Back up user database before removal so a reinstall can restore it.
