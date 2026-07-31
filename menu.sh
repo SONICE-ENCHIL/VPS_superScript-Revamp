@@ -3452,7 +3452,12 @@ install_udp_custom() {
             rm -rf "$UDP_CUSTOM_DIR" "$temp_build"
             return
         fi
-        (cd "$temp_build" && cmake . >/dev/null 2>&1 && make >/dev/null 2>&1)
+        # Same CMake 4 incompatibility as install_badvpn: badvpn's
+        # cmake_minimum_required is older than CMake 4 accepts, so fall back to
+        # the policy-minimum override before treating it as a build failure.
+        ( cd "$temp_build" && cmake . >/dev/null 2>&1 ) \
+            || ( cd "$temp_build" && cmake -DCMAKE_POLICY_VERSION_MINIMUM=3.5 . >/dev/null 2>&1 )
+        ( cd "$temp_build" && make >/dev/null 2>&1 )
         local compiled_bin=$(find "$temp_build" -name "badvpn-udpgw" -type f | head -n 1)
         if [[ -n "$compiled_bin" && -f "$compiled_bin" ]]; then
             # A silent cp failure here would leave the unit's ExecStart pointing
@@ -3719,8 +3724,13 @@ install_badvpn() {
     # Build inside a subshell so the menu's own working directory never moves
     # into a tree we are about to delete on failure.
     echo -e "\n${C_GREEN}⚙️ Running CMake...${C_RESET}"
-    ( cd "$BADVPN_BUILD_DIR" && cmake . ) || {
-        echo -e "${C_RED}❌ CMake configuration failed.${C_RESET}"; rm -rf "$BADVPN_BUILD_DIR"; return; }
+    # badvpn's CMakeLists declares a cmake_minimum_required older than CMake 4
+    # will accept ("Compatibility with CMake < 3.5 has been removed"), so on
+    # Ubuntu 25.10+/26.04 the bare `cmake .` fails. Retry with the documented
+    # escape hatch before giving up.
+    ( cd "$BADVPN_BUILD_DIR" && cmake . ) \
+        || ( cd "$BADVPN_BUILD_DIR" && cmake -DCMAKE_POLICY_VERSION_MINIMUM=3.5 . ) \
+        || { echo -e "${C_RED}❌ CMake configuration failed.${C_RESET}"; rm -rf "$BADVPN_BUILD_DIR"; return; }
     echo -e "\n${C_GREEN}🛠️ Compiling source...${C_RESET}"
     ( cd "$BADVPN_BUILD_DIR" && make ) || {
         echo -e "${C_RED}❌ Compilation (make) failed.${C_RESET}"; rm -rf "$BADVPN_BUILD_DIR"; return; }
