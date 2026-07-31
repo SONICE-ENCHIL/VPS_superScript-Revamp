@@ -6461,131 +6461,200 @@ show_banner() {
     echo -e "${C_BLUE} ═══════════════════════════════════════════════════════════${C_RESET}"
 }
 
+# Coloured (Active)/(Inactive) tag for a systemd unit. Replaces the ~20
+# hand-written status locals the protocol menu used to compute up front.
+_pstat() {
+    if systemctl is-active --quiet "$1" 2>/dev/null; then
+        printf '%s' "${C_STATUS_A}(Active)${C_RESET}"
+    else
+        printf '%s' "${C_STATUS_I}(Inactive)${C_RESET}"
+    fi
+}
+
+# The protocol roster, shared by the install and uninstall submenus so the
+# numbering can never drift between them. Format: number|label|unit
+_PROTO_LIST=(
+    "01|BADVPN|badvpn"
+    "02|UDP-CUSTOM|udp-custom"
+    "03|HAPROXY SSL TUNNEL|haproxy"
+    "04|DNSTT (SLOWDNS)|dnstt.service"
+    "05|FALCON PROXY|falconproxy"
+    "06|ZIVPN|zivpn.service"
+    "07|DROPBEAR|dropbear"
+    "08|OPENVPN|openvpn@server-tcp"
+    "09|WIREGUARD|wg-quick@wg0"
+    "10|HYSTERIA 1/2|hysteria-server"
+    "11|SHADOWSOCKS|shadowsocks-libev"
+    "12|SOCKS5 PROXY|danted"
+    "13|SLOWUDP|slowudp"
+    "14|OHP|ohp"
+    "15|SQUID PROXY|squid"
+    "16|STUNNEL|stunnel4"
+    "17|UDP REQUEST|udp-request"
+    "18|ARGO TUNNEL|argo-tunnel"
+    "19|WS-SSH|ws-ssh"
+)
+
+# Print the roster two per row with live status tags. $1 is the arrow/verb
+# colour hint: "in" for installs, "un" for uninstalls.
+_proto_grid() {
+    local mode="$1" i total=${#_PROTO_LIST[@]}
+    local n1 l1 u1 n2 l2 u2
+    for ((i=0; i<total; i+=2)); do
+        IFS='|' read -r n1 l1 u1 <<<"${_PROTO_LIST[i]}"
+        if (( i+1 < total )); then
+            IFS='|' read -r n2 l2 u2 <<<"${_PROTO_LIST[i+1]}"
+            printf "\033[3G${C_PURPLE}[${C_GREEN}%s${C_PURPLE}]${C_RESET}\033[9G${C_WARN}⇨${C_RESET} ${C_WHITE}%-20s${C_RESET}%s\033[44G${C_PURPLE}[${C_GREEN}%s${C_PURPLE}]${C_RESET}\033[50G${C_WARN}⇨${C_RESET} ${C_WHITE}%-20s${C_RESET}%s\033[K\n" \
+                "$n1" "$l1" "$(_pstat "$u1")" "$n2" "$l2" "$(_pstat "$u2")"
+        else
+            printf "\033[3G${C_PURPLE}[${C_GREEN}%s${C_PURPLE}]${C_RESET}\033[9G${C_WARN}⇨${C_RESET} ${C_WHITE}%-20s${C_RESET}%s\033[K\n" \
+                "$n1" "$l1" "$(_pstat "$u1")"
+        fi
+    done
+}
+
+# Panels kept separate from the protocol lists, as they are a different kind of
+# thing (web UIs, not tunnels) and there are only two actions.
+panel_manage_menu() {
+    while true; do
+        show_banner
+        local xui_st
+        if command -v x-ui &>/dev/null; then
+            xui_st="${C_STATUS_A}(Installed)${C_RESET}"
+        else
+            xui_st="${C_STATUS_I}(Not Installed)${C_RESET}"
+        fi
+        echo -e "  ${C_TITLE}              💻 MANAGEMENT PANELS${C_RESET}"
+        echo -e "${C_BLUE} ═══════════════════════════════════════════════════════════${C_RESET}"
+        printf "\033[3G${C_PURPLE}[${C_GREEN}01${C_PURPLE}]${C_RESET}\033[9G${C_WARN}⇨${C_RESET} ${C_WHITE}%-28s${C_RESET}%s\033[K\n" "📥 INSTALL X-UI / 3X-UI" "$xui_st"
+        _mi "02" "🗑️ UNINSTALL X-UI / 3X-UI"
+        echo -e "${C_BLUE} ═══════════════════════════════════════════════════════════${C_RESET}"
+        echo -e "  ${C_PURPLE}[${C_GREEN}0${C_PURPLE}]${C_RESET} ${C_WARN}⇦${C_RESET} ${C_DIM}${C_WARN}[ BACK ]${C_RESET}"
+        echo -e "${C_BLUE} ═══════════════════════════════════════════════════════════${C_RESET}"
+        if ! read -r -p "$(echo -e ${C_PROMPT}"👉 Select an option: "${C_RESET})" pc; then
+            echo; return
+        fi
+        case $pc in
+            01|1) install_panel_menu; press_enter ;;
+            02|2) uninstall_xui_panel; press_enter ;;
+            0) return ;;
+            *) invalid_option ;;
+        esac
+    done
+}
+
+install_protocols_menu() {
+    while true; do
+        show_banner
+        echo -e "  ${C_TITLE}                📥 INSTALL PROTOCOLS${C_RESET}"
+        echo -e "${C_BLUE} ═══════════════════════════════════════════════════════════${C_RESET}"
+        _proto_grid in
+        echo -e "${C_BLUE} ═══════════════════════════════════════════════════════════${C_RESET}"
+        echo -e "  ${C_PURPLE}[${C_GREEN}0${C_PURPLE}]${C_RESET} ${C_WARN}⇦${C_RESET} ${C_DIM}${C_WARN}[ BACK ]${C_RESET}"
+        echo -e "${C_BLUE} ═══════════════════════════════════════════════════════════${C_RESET}"
+        if ! read -r -p "$(echo -e ${C_PROMPT}"👉 Select protocol to install: "${C_RESET})" ic; then
+            echo; return
+        fi
+        case $ic in
+            01|1)  install_badvpn; press_enter ;;
+            02|2)  install_udp_custom; press_enter ;;
+            03|3)  install_ssl_tunnel; press_enter ;;
+            04|4)  install_dnstt; press_enter ;;
+            05|5)  install_falcon_proxy; press_enter ;;
+            06|6)  install_zivpn; press_enter ;;
+            07|7)  install_dropbear; press_enter ;;
+            08|8)  install_openvpn; press_enter ;;
+            09|9)  install_wireguard; press_enter ;;
+            10) install_hysteria; press_enter ;;
+            11) install_shadowsocks; press_enter ;;
+            12) install_socks5; press_enter ;;
+            13) install_slowudp; press_enter ;;
+            14) install_ohp; press_enter ;;
+            15) install_squid; press_enter ;;
+            16) install_stunnel; press_enter ;;
+            17) install_udp_request; press_enter ;;
+            18) install_argo_tunnel; press_enter ;;
+            19) install_ws_ssh; press_enter ;;
+            0) return ;;
+            *) invalid_option ;;
+        esac
+    done
+}
+
+uninstall_protocols_menu() {
+    while true; do
+        show_banner
+        echo -e "  ${C_DANGER}               🗑️ UNINSTALL PROTOCOLS${C_RESET}"
+        echo -e "${C_BLUE} ═══════════════════════════════════════════════════════════${C_RESET}"
+        _proto_grid un
+        echo -e "${C_BLUE} ═══════════════════════════════════════════════════════════${C_RESET}"
+        echo -e "  ${C_PURPLE}[${C_GREEN}0${C_PURPLE}]${C_RESET} ${C_WARN}⇦${C_RESET} ${C_DIM}${C_WARN}[ BACK ]${C_RESET}"
+        echo -e "${C_BLUE} ═══════════════════════════════════════════════════════════${C_RESET}"
+        if ! read -r -p "$(echo -e ${C_PROMPT}"👉 Select protocol to uninstall: "${C_RESET})" uc; then
+            echo; return
+        fi
+        case $uc in
+            01|1)  uninstall_badvpn; press_enter ;;
+            02|2)  uninstall_udp_custom; press_enter ;;
+            03|3)  uninstall_ssl_tunnel; press_enter ;;
+            04|4)  uninstall_dnstt; press_enter ;;
+            05|5)  uninstall_falcon_proxy; press_enter ;;
+            06|6)  uninstall_zivpn; press_enter ;;
+            07|7)  uninstall_dropbear; press_enter ;;
+            08|8)  uninstall_openvpn; press_enter ;;
+            09|9)  uninstall_wireguard; press_enter ;;
+            10) uninstall_hysteria; press_enter ;;
+            11) uninstall_shadowsocks; press_enter ;;
+            12) uninstall_socks5; press_enter ;;
+            13) uninstall_slowudp; press_enter ;;
+            14) uninstall_ohp; press_enter ;;
+            15) uninstall_squid; press_enter ;;
+            16) uninstall_stunnel; press_enter ;;
+            17) uninstall_udp_request; press_enter ;;
+            18) uninstall_argo_tunnel; press_enter ;;
+            19) uninstall_ws_ssh; press_enter ;;
+            0) return ;;
+            *) invalid_option ;;
+        esac
+    done
+}
+
 protocol_menu() {
     while true; do
         show_banner
-        local badvpn_status; if systemctl is-active --quiet badvpn; then badvpn_status="${C_STATUS_A}(Active)${C_RESET}"; else badvpn_status="${C_STATUS_I}(Inactive)${C_RESET}"; fi
-        local udp_custom_status; if systemctl is-active --quiet udp-custom; then udp_custom_status="${C_STATUS_A}(Active)${C_RESET}"; else udp_custom_status="${C_STATUS_I}(Inactive)${C_RESET}"; fi
-        local zivpn_status; if systemctl is-active --quiet zivpn.service; then zivpn_status="${C_STATUS_A}(Active)${C_RESET}"; else zivpn_status="${C_STATUS_I}(Inactive)${C_RESET}"; fi
-        
-        local ssl_tunnel_text="HAProxy Edge Stack (80/443)"
-        local ssl_tunnel_status="${C_STATUS_I}(Inactive)${C_RESET}"
-        if systemctl is-active --quiet haproxy; then
-            ssl_tunnel_status="${C_STATUS_A}(Active)${C_RESET}"
-        fi
-        
-        local dnstt_status; if systemctl is-active --quiet dnstt.service; then dnstt_status="${C_STATUS_A}(Active)${C_RESET}"; else dnstt_status="${C_STATUS_I}(Inactive)${C_RESET}"; fi
-        
-        local falconproxy_status="${C_STATUS_I}(Inactive)${C_RESET}"
-        local falconproxy_ports=""
-        if systemctl is-active --quiet falconproxy; then
-            if [ -f "$FALCONPROXY_CONFIG_FILE" ]; then source "$FALCONPROXY_CONFIG_FILE"; fi
-            falconproxy_ports=" ($PORTS)"
-            falconproxy_status="${C_STATUS_A}(Active - ${INSTALLED_VERSION:-latest})${C_RESET}"
-        fi
-
-        local nginx_status; if systemctl is-active --quiet nginx; then nginx_status="${C_STATUS_A}(Active)${C_RESET}"; else nginx_status="${C_STATUS_I}(Inactive)${C_RESET}"; fi
-        local xui_status; if command -v x-ui &> /dev/null; then xui_status="${C_STATUS_A}(Installed)${C_RESET}"; else xui_status="${C_STATUS_I}(Not Installed)${C_RESET}"; fi
-
-        local dropbear_status; if systemctl is-active --quiet dropbear 2>/dev/null; then dropbear_status="${C_STATUS_A}(Active)${C_RESET}"; else dropbear_status="${C_STATUS_I}(Inactive)${C_RESET}"; fi
-        local openvpn_status; if systemctl is-active --quiet openvpn@server-tcp 2>/dev/null; then openvpn_status="${C_STATUS_A}(Active)${C_RESET}"; else openvpn_status="${C_STATUS_I}(Inactive)${C_RESET}"; fi
-        local wg_status; if systemctl is-active --quiet wg-quick@wg0 2>/dev/null; then wg_status="${C_STATUS_A}(Active)${C_RESET}"; else wg_status="${C_STATUS_I}(Inactive)${C_RESET}"; fi
-        local hysteria_status; if systemctl is-active --quiet hysteria-server 2>/dev/null; then hysteria_status="${C_STATUS_A}(Active)${C_RESET}"; else hysteria_status="${C_STATUS_I}(Inactive)${C_RESET}"; fi
-        local ss_status; if systemctl is-active --quiet shadowsocks-libev 2>/dev/null; then ss_status="${C_STATUS_A}(Active)${C_RESET}"; else ss_status="${C_STATUS_I}(Inactive)${C_RESET}"; fi
-        local socks5_status; if systemctl is-active --quiet danted 2>/dev/null; then socks5_status="${C_STATUS_A}(Active)${C_RESET}"; else socks5_status="${C_STATUS_I}(Inactive)${C_RESET}"; fi
-        local slowudp_status; if systemctl is-active --quiet slowudp 2>/dev/null; then slowudp_status="${C_STATUS_A}(Active)${C_RESET}"; else slowudp_status="${C_STATUS_I}(Inactive)${C_RESET}"; fi
-        local ohp_status; if systemctl is-active --quiet ohp 2>/dev/null; then ohp_status="${C_STATUS_A}(Active)${C_RESET}"; else ohp_status="${C_STATUS_I}(Inactive)${C_RESET}"; fi
-        local squid_status; if systemctl is-active --quiet squid 2>/dev/null; then squid_status="${C_STATUS_A}(Active)${C_RESET}"; else squid_status="${C_STATUS_I}(Inactive)${C_RESET}"; fi
-        local stunnel_status; if systemctl is-active --quiet stunnel4 2>/dev/null; then stunnel_status="${C_STATUS_A}(Active)${C_RESET}"; else stunnel_status="${C_STATUS_I}(Inactive)${C_RESET}"; fi
-        local udp_req_status; if systemctl is-active --quiet udp-request 2>/dev/null; then udp_req_status="${C_STATUS_A}(Active)${C_RESET}"; else udp_req_status="${C_STATUS_I}(Inactive)${C_RESET}"; fi
-        local argo_status; if systemctl is-active --quiet argo-tunnel 2>/dev/null; then argo_status="${C_STATUS_A}(Active)${C_RESET}"; else argo_status="${C_STATUS_I}(Inactive)${C_RESET}"; fi
-        local ws_ssh_status; if systemctl is-active --quiet ws-ssh 2>/dev/null; then local _wr=$(grep -oP '^RESPONSE="\K[^"]*' "$WS_SSH_CONFIG_FILE" 2>/dev/null || echo "101"); ws_ssh_status="${C_STATUS_A}(Active - ${_wr})${C_RESET}"; else ws_ssh_status="${C_STATUS_I}(Inactive)${C_RESET}"; fi
-        
-        echo -e "\n   ${C_TITLE}══════════════[ ${C_BOLD}🔌 PROTOCOL & PANEL MANAGEMENT ${C_RESET}${C_TITLE}]══════════════${C_RESET}"
-        echo -e "     ${C_ACCENT}--- EXISTING PROTOCOLS ---${C_RESET}"
-        printf "     ${C_CHOICE}[ 1]${C_RESET} %-45s %s\n" "🚀 Install badvpn (UDP 7300)" "$badvpn_status"
-        printf "     ${C_CHOICE}[ 2]${C_RESET} %-45s\n" "🗑️ Uninstall badvpn"
-        printf "     ${C_CHOICE}[ 3]${C_RESET} %-45s %s\n" "🚀 Install udp-custom" "$udp_custom_status"
-        printf "     ${C_CHOICE}[ 4]${C_RESET} %-45s\n" "🗑️ Uninstall udp-custom"
-        printf "     ${C_CHOICE}[ 5]${C_RESET} %-45s %s\n" "🔒 Install ${ssl_tunnel_text}" "$ssl_tunnel_status"
-        printf "     ${C_CHOICE}[ 6]${C_RESET} %-45s\n" "🗑️ Uninstall HAProxy Edge Stack"
-        printf "     ${C_CHOICE}[ 7]${C_RESET} %-45s %s\n" "📡 Install/View DNSTT (Port 53)" "$dnstt_status"
-        printf "     ${C_CHOICE}[ 8]${C_RESET} %-45s\n" "🗑️ Uninstall DNSTT"
-        printf "     ${C_CHOICE}[ 9]${C_RESET} %-45s %s\n" "🦅 Install Falcon Proxy (Select Version)" "$falconproxy_status"
-        printf "     ${C_CHOICE}[10]${C_RESET} %-45s\n" "🗑️ Uninstall Falcon Proxy"
-        printf "     ${C_CHOICE}[11]${C_RESET} %-45s %s\n" "🌐 Install/Manage Internal Nginx (8880/8443)" "$nginx_status"
-        printf "     ${C_CHOICE}[12]${C_RESET} %-45s %s\n" "🛡️ Install ZiVPN (UDP 5667)" "$zivpn_status"
-        printf "     ${C_CHOICE}[13]${C_RESET} %-45s\n" "🗑️ Uninstall ZiVPN"
+        # Only the four statuses this hub actually shows. The per-protocol
+        # status tags now live in _proto_grid, computed on demand by _pstat.
+        local nginx_status; nginx_status=$(_pstat nginx)
+        local xui_status
+        if command -v x-ui &>/dev/null; then xui_status="${C_STATUS_A}(Installed)${C_RESET}"; else xui_status="${C_STATUS_I}(Not Installed)${C_RESET}"; fi
         local hwid_status; if systemctl is-active --quiet VPS_superScript-hwid-enforcer 2>/dev/null; then hwid_status="${C_STATUS_A}(On)${C_RESET}"; else hwid_status="${C_STATUS_I}(Off)${C_RESET}"; fi
         local udpshare_status; if systemctl is-active --quiet VPS_superScript-udp-share 2>/dev/null; then udpshare_status="${C_STATUS_A}(On)${C_RESET}"; else udpshare_status="${C_STATUS_I}(Off)${C_RESET}"; fi
-        printf "     ${C_CHOICE}[14]${C_RESET} %-45s %s\n" "🔒 HWID Lock (udp-custom + ZiVPN + SlowUDP + UDP-Req)" "$hwid_status"
-        printf "     ${C_CHOICE}[15]${C_RESET} %-45s\n" "🚀 Exclude Ports (udp-custom / DNSTT toggle)"
-        printf "     ${C_CHOICE}[18]${C_RESET} %-45s %s\n" "🚦 UDP Anti-Sharing (udp-custom connection limit)" "$udpshare_status"
-        
-        echo -e "     ${C_ACCENT}--- NEW PROTOCOLS ---${C_RESET}"
-        printf "     ${C_CHOICE}[20]${C_RESET} %-45s %s\n" "🦘 Install Dropbear (109, 143)" "$dropbear_status"
-        printf "     ${C_CHOICE}[21]${C_RESET} %-45s\n" "🗑️ Uninstall Dropbear"
-        printf "     ${C_CHOICE}[22]${C_RESET} %-45s %s\n" "🛡️ Install OpenVPN (1194/2200/25000)" "$openvpn_status"
-        printf "     ${C_CHOICE}[23]${C_RESET} %-45s\n" "🗑️ Uninstall OpenVPN"
-        printf "     ${C_CHOICE}[24]${C_RESET} %-45s %s\n" "🔗 Install WireGuard (51820)" "$wg_status"
-        printf "     ${C_CHOICE}[25]${C_RESET} %-45s\n" "🗑️ Uninstall WireGuard"
-        printf "     ${C_CHOICE}[26]${C_RESET} %-45s %s\n" "🌪️ Install Hysteria 1/2" "$hysteria_status"
-        printf "     ${C_CHOICE}[27]${C_RESET} %-45s\n" "🗑️ Uninstall Hysteria"
-        printf "     ${C_CHOICE}[28]${C_RESET} %-45s %s\n" "📡 Install ShadowSocks (2443, 3443)" "$ss_status"
-        printf "     ${C_CHOICE}[29]${C_RESET} %-45s\n" "🗑️ Uninstall ShadowSocks"
-        printf "     ${C_CHOICE}[30]${C_RESET} %-45s %s\n" "🧦 Install Socks5 Proxy (1080)" "$socks5_status"
-        printf "     ${C_CHOICE}[31]${C_RESET} %-45s\n" "🗑️ Uninstall Socks5 Proxy"
-        printf "     ${C_CHOICE}[32]${C_RESET} %-45s %s\n" "🐢 Install SlowUDP" "$slowudp_status"
-        printf "     ${C_CHOICE}[33]${C_RESET} %-45s\n" "🗑️ Uninstall SlowUDP"
-        printf "     ${C_CHOICE}[34]${C_RESET} %-45s %s\n" "🌉 Install OHP (8181/8282/8383)" "$ohp_status"
-        printf "     ${C_CHOICE}[35]${C_RESET} %-45s\n" "🗑️ Uninstall OHP"
-        printf "     ${C_CHOICE}[36]${C_RESET} %-45s %s\n" "🐙 Install Squid Proxy (3128)" "$squid_status"
-        printf "     ${C_CHOICE}[37]${C_RESET} %-45s\n" "🗑️ Uninstall Squid Proxy"
-        printf "     ${C_CHOICE}[38]${C_RESET} %-45s %s\n" "🔒 Install Stunnel (777)" "$stunnel_status"
-        printf "     ${C_CHOICE}[39]${C_RESET} %-45s\n" "🗑️ Uninstall Stunnel"
-        printf "     ${C_CHOICE}[40]${C_RESET} %-45s %s\n" "📦 Install UDP Request" "$udp_req_status"
-        printf "     ${C_CHOICE}[41]${C_RESET} %-45s\n" "🗑️ Uninstall UDP Request"
-        printf "     ${C_CHOICE}[42]${C_RESET} %-45s %s\n" "☁️ Install Argo Tunnel" "$argo_status"
-        printf "     ${C_CHOICE}[43]${C_RESET} %-45s\n" "🗑️ Uninstall Argo Tunnel"
-        printf "     ${C_CHOICE}[44]${C_RESET} %-45s %s\n" "🌐 Install WS-SSH (80, 443)" "$ws_ssh_status"
-        printf "     ${C_CHOICE}[45]${C_RESET} %-45s\n" "🗑️ Uninstall WS-SSH"
-        
-        echo -e "     ${C_ACCENT}--- 💻 MANAGEMENT PANELS ---${C_RESET}"
-        printf "     ${C_CHOICE}[16]${C_RESET} %-45s %s\n" "💻 Install X-UI / 3X-UI Panel" "$xui_status"
-        printf "     ${C_CHOICE}[17]${C_RESET} %-45s\n" "🗑️ Uninstall X-UI / 3X-UI Panel"
-        
-        echo -e "   ${C_DIM}~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~${C_RESET}"
-        echo -e "     ${C_WARN}[ 0]${C_RESET} ↩️ Return"
-        echo
+        echo -e "  ${C_TITLE}           🔌 PROTOCOL & PANEL MANAGEMENT${C_RESET}"
+        echo -e "${C_BLUE} ═══════════════════════════════════════════════════════════${C_RESET}"
+        _mi "01" "📥 INSTALL PROTOCOLS" "▸"
+        _mi "02" "🗑️ UNINSTALL PROTOCOLS" "▸"
+        echo -e "${C_BLUE} ═══════════════════════════════════════════════════════════${C_RESET}"
+        printf "\033[3G${C_PURPLE}[${C_GREEN}03${C_PURPLE}]${C_RESET}\033[9G${C_WARN}⇨${C_RESET} ${C_WHITE}%-28s${C_RESET}%s\033[K\n" "💻 X-UI / 3X-UI PANEL" "$xui_status"
+        printf "\033[3G${C_PURPLE}[${C_GREEN}04${C_PURPLE}]${C_RESET}\033[9G${C_WARN}⇨${C_RESET} ${C_WHITE}%-28s${C_RESET}%s\033[K\n" "🌐 INTERNAL NGINX (8880/8443)" "$nginx_status"
+        echo -e "${C_BLUE} ═══════════════════════════════════════════════════════════${C_RESET}"
+        printf "\033[3G${C_PURPLE}[${C_GREEN}05${C_PURPLE}]${C_RESET}\033[9G${C_WARN}⇨${C_RESET} ${C_WHITE}%-28s${C_RESET}%s\033[K\n" "🔒 HWID LOCK" "$hwid_status"
+        printf "\033[3G${C_PURPLE}[${C_GREEN}06${C_PURPLE}]${C_RESET}\033[9G${C_WARN}⇨${C_RESET} ${C_WHITE}%-28s${C_RESET}%s\033[K\n" "🚦 UDP ANTI-SHARING" "$udpshare_status"
+        _mi "07" "🚀 EXCLUDE PORTS (udp-custom / DNSTT)"
+        echo -e "${C_BLUE} ═══════════════════════════════════════════════════════════${C_RESET}"
+        echo -e "  ${C_PURPLE}[${C_GREEN}0${C_PURPLE}]${C_RESET} ${C_WARN}⇦${C_RESET} ${C_DIM}${C_WARN}[ BACK ]${C_RESET}"
+        echo -e "${C_BLUE} ═══════════════════════════════════════════════════════════${C_RESET}"
         if ! read -r -p "$(echo -e ${C_PROMPT}"👉 Select an option: "${C_RESET})" choice; then
             echo
             return
         fi
         case $choice in
-            1) install_badvpn; press_enter ;; 2) uninstall_badvpn; press_enter ;;
-            3) install_udp_custom; press_enter ;; 4) uninstall_udp_custom; press_enter ;;
-            5) install_ssl_tunnel; press_enter ;; 6) uninstall_ssl_tunnel; press_enter ;;
-            7) install_dnstt; press_enter ;; 8) uninstall_dnstt; press_enter ;;
-            9) install_falcon_proxy; press_enter ;; 10) uninstall_falcon_proxy; press_enter ;;
-            11) nginx_proxy_menu ;;
-            12) install_zivpn; press_enter ;; 13) uninstall_zivpn; press_enter ;;
-            14) hwid_lock_menu ;;
-            15) manage_udp_custom_exclude; press_enter ;;
-            16) install_panel_menu; press_enter ;; 17) uninstall_xui_panel; press_enter ;;
-            18) udp_share_menu ;;
-            20) install_dropbear; press_enter ;; 21) uninstall_dropbear; press_enter ;;
-            22) install_openvpn; press_enter ;; 23) uninstall_openvpn; press_enter ;;
-            24) install_wireguard; press_enter ;; 25) uninstall_wireguard; press_enter ;;
-            26) install_hysteria; press_enter ;; 27) uninstall_hysteria; press_enter ;;
-            28) install_shadowsocks; press_enter ;; 29) uninstall_shadowsocks; press_enter ;;
-            30) install_socks5; press_enter ;; 31) uninstall_socks5; press_enter ;;
-            32) install_slowudp; press_enter ;; 33) uninstall_slowudp; press_enter ;;
-            34) install_ohp; press_enter ;; 35) uninstall_ohp; press_enter ;;
-            36) install_squid; press_enter ;; 37) uninstall_squid; press_enter ;;
-            38) install_stunnel; press_enter ;; 39) uninstall_stunnel; press_enter ;;
-            40) install_udp_request; press_enter ;; 41) uninstall_udp_request; press_enter ;;
-            42) install_argo_tunnel; press_enter ;; 43) uninstall_argo_tunnel; press_enter ;;
-            44) install_ws_ssh; press_enter ;; 45) uninstall_ws_ssh; press_enter ;;
+            01|1) install_protocols_menu ;;
+            02|2) uninstall_protocols_menu ;;
+            03|3) panel_manage_menu ;;
+            04|4) nginx_proxy_menu ;;
+            05|5) hwid_lock_menu ;;
+            06|6) udp_share_menu ;;
+            07|7) manage_udp_custom_exclude; press_enter ;;
             0) return ;;
             *) invalid_option ;;
         esac
