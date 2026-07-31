@@ -507,6 +507,44 @@ ff_fetch_binary() {
     return 0
 }
 
+# Fetch a remote shell installer to a temp file, sanity-check it, then run it.
+# `bash <(curl ...)` discards curl's exit status: a DNS failure, a 404 HTML
+# page, or a rate-limit JSON body all get piped straight into bash and
+# "succeed". This downloads first, rejects empty/HTML/JSON bodies, and only
+# then executes — so a bad URL or a mistyped version tag reports an error
+# instead of silently doing nothing.
+# Usage: ff_run_remote_installer <url> [args-passed-to-script...]
+ff_run_remote_installer() {
+    local url="$1"; shift
+    local tmp rc
+    tmp=$(mktemp /tmp/ff-installer.XXXXXX 2>/dev/null) || {
+        echo -e "${C_RED}❌ Could not create a temporary file.${C_RESET}"
+        return 1
+    }
+    if ! curl -fsSL --max-time 60 -o "$tmp" "$url"; then
+        echo -e "${C_RED}❌ Download failed:${C_RESET} ${C_YELLOW}$url${C_RESET}"
+        echo -e "${C_DIM}   Check your network, or that the version tag exists.${C_RESET}"
+        rm -f "$tmp"; return 1
+    fi
+    if [[ ! -s "$tmp" ]]; then
+        echo -e "${C_RED}❌ Downloaded installer is empty.${C_RESET}"
+        rm -f "$tmp"; return 1
+    fi
+    # Reject HTML/JSON error bodies that still returned HTTP 200.
+    local first
+    first=$(head -c 1 "$tmp" 2>/dev/null)
+    case "$first" in
+        "<"|"{"|"[")
+            echo -e "${C_RED}❌ Server returned a web page, not an install script.${C_RESET}"
+            echo -e "${C_DIM}   That usually means the version does not exist.${C_RESET}"
+            rm -f "$tmp"; return 1 ;;
+    esac
+    bash "$tmp" "$@"
+    rc=$?
+    rm -f "$tmp"
+    return $rc
+}
+
 # Mandatory Dependency Check (Added jq and curl)
 check_environment() {
     local missing_packages=()
@@ -3351,7 +3389,10 @@ install_udp_custom() {
 
     echo -e "\n${C_GREEN}⚙️ Creating directory for udp-custom...${C_RESET}"
     rm -rf "$UDP_CUSTOM_DIR"
-    mkdir -p "$UDP_CUSTOM_DIR"
+    if ! mkdir -p "$UDP_CUSTOM_DIR"; then
+        echo -e "\n${C_RED}❌ Could not create $UDP_CUSTOM_DIR.${C_RESET}"
+        return
+    fi
 
     echo -e "\n${C_GREEN}⚙️ Detecting system architecture...${C_RESET}"
     local arch
@@ -3376,7 +3417,11 @@ install_udp_custom() {
         local bundled="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/udp/$binary_asset"
         if [[ -s "$bundled" ]]; then
             echo -e "${C_YELLOW}ℹ️ Remote download failed; using bundled binary: $bundled${C_RESET}"
-            cp "$bundled" "$UDP_CUSTOM_DIR/udp-custom"
+            if ! cp "$bundled" "$UDP_CUSTOM_DIR/udp-custom"; then
+                echo -e "\n${C_RED}❌ Failed to copy the bundled udp-custom binary.${C_RESET}"
+                rm -rf "$UDP_CUSTOM_DIR"
+                return
+            fi
         else
             echo -e "\n${C_RED}❌ Failed to download a valid udp-custom binary from:${C_RESET}"
             echo -e "   ${C_YELLOW}$binary_url${C_RESET}"
@@ -3399,11 +3444,25 @@ install_udp_custom() {
         ff_pkg_install cmake g++ make git >/dev/null 2>&1
         local temp_build="/tmp/badvpn_build"
         rm -rf "$temp_build"
-        git clone -q https://github.com/ambrop72/badvpn.git "$temp_build"
+        # Check the clone: without this a network failure fell through to the
+        # build and the user was told "failed to compile" instead of the truth.
+        if ! git clone -q --depth 1 https://github.com/ambrop72/badvpn.git "$temp_build"; then
+            echo -e "\n${C_RED}❌ Failed to clone the badvpn source for the udpgw helper.${C_RESET}"
+            echo -e "${C_YELLOW}ℹ️ Check network/DNS, then try again.${C_RESET}"
+            rm -rf "$UDP_CUSTOM_DIR" "$temp_build"
+            return
+        fi
         (cd "$temp_build" && cmake . >/dev/null 2>&1 && make >/dev/null 2>&1)
         local compiled_bin=$(find "$temp_build" -name "badvpn-udpgw" -type f | head -n 1)
         if [[ -n "$compiled_bin" && -f "$compiled_bin" ]]; then
-            cp "$compiled_bin" "$UDPGW_BINARY"
+            # A silent cp failure here would leave the unit's ExecStart pointing
+            # at a binary that does not exist, so the install "succeeds" and the
+            # service dies at start.
+            if ! cp "$compiled_bin" "$UDPGW_BINARY"; then
+                echo -e "\n${C_RED}❌ Failed to install the compiled udpgw binary.${C_RESET}"
+                rm -rf "$UDP_CUSTOM_DIR" "$temp_build"
+                return
+            fi
             chmod +x "$UDPGW_BINARY"
         else
             echo -e "\n${C_RED}❌ Failed to compile udpgw helper for $arch.${C_RESET}"
@@ -4382,8 +4441,15 @@ install_dnstt() {
     echo -e "${C_GREEN}⚙️ Forcing release of Port 53 (stopping systemd-resolved)...${C_RESET}"
     systemctl stop systemd-resolved >/dev/null 2>&1
     systemctl disable systemd-resolved >/dev/null 2>&1
+    # A previous DNSTT install sets chattr +i on this file (see below). Without
+    # clearing it first, both the rm and the write fail silently and DNS keeps
+    # pointing at the old resolver with no error shown.
+    chattr -i /etc/resolv.conf &>/dev/null
     rm -f /etc/resolv.conf
-    echo "nameserver 8.8.8.8" | tee /etc/resolv.conf > /dev/null
+    if ! echo "nameserver 8.8.8.8" > /etc/resolv.conf 2>/dev/null; then
+        echo -e "${C_YELLOW}⚠️ Could not update /etc/resolv.conf (immutable or read-only?).${C_RESET}"
+        echo -e "${C_DIM}   DNSTT may still work, but name resolution could be stale.${C_RESET}"
+    fi
     # ----------------------------------------------------------------
     
     echo -e "\n${C_BLUE}🔎 Checking if port 53 (UDP) is available...${C_RESET}"
@@ -4538,10 +4604,20 @@ install_dnstt() {
     echo -e "${C_BLUE}🔐 Generating cryptographic keys...${C_RESET}"
     mkdir -p "$DNSTT_KEYS_DIR"
     "$DNSTT_BINARY" -gen-key -privkey-file "$DNSTT_KEYS_DIR/server.key" -pubkey-file "$DNSTT_KEYS_DIR/server.pub"
-    if [[ ! -f "$DNSTT_KEYS_DIR/server.key" ]]; then echo -e "${C_RED}❌ Failed to generate DNSTT keys.${C_RESET}"; return; fi
-    
+    # Check BOTH keys. Only server.key was verified before, so a missing pubkey
+    # left PUBLIC_KEY empty, got saved to the config, and printed a blank key in
+    # the client details that nobody could connect with.
+    if [[ ! -s "$DNSTT_KEYS_DIR/server.key" || ! -s "$DNSTT_KEYS_DIR/server.pub" ]]; then
+        echo -e "${C_RED}❌ Failed to generate DNSTT keys.${C_RESET}"
+        return
+    fi
+
     local PUBLIC_KEY
     PUBLIC_KEY=$(cat "$DNSTT_KEYS_DIR/server.pub")
+    if [[ -z "$PUBLIC_KEY" ]]; then
+        echo -e "${C_RED}❌ DNSTT public key is empty — refusing to write a broken config.${C_RESET}"
+        return
+    fi
     
     echo -e "\n${C_BLUE}📝 Creating systemd service...${C_RESET}"
     cat > "$DNSTT_SERVICE_FILE" <<-EOF
@@ -6081,7 +6157,7 @@ install_3xui_panel() {
     case $choice in
         1)
             echo -e "\n${C_BLUE}⚙️ Installing the latest version...${C_RESET}"
-            bash <(curl -Ls https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh)
+            ff_run_remote_installer "https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh" || return
             ;;
         2)
             read -p "👉 Enter the version to install (e.g., 2.4.5): " version
@@ -6090,7 +6166,7 @@ install_3xui_panel() {
                 return
             fi
             echo -e "\n${C_BLUE}⚙️ Installing version ${C_YELLOW}$version...${C_RESET}"
-            bash <(curl -Ls "https://raw.githubusercontent.com/mhsanaei/3x-ui/v$version/install.sh") "v$version"
+            ff_run_remote_installer "https://raw.githubusercontent.com/mhsanaei/3x-ui/v$version/install.sh" "v$version" || return
             ;;
         0)
             echo -e "\n${C_YELLOW}❌ Installation cancelled.${C_RESET}"
@@ -6114,7 +6190,7 @@ install_xui_panel() {
     case $choice in
         1)
             echo -e "\n${C_BLUE}⚙️ Installing the latest version...${C_RESET}"
-            bash <(curl -Ls https://raw.githubusercontent.com/alireza0/x-ui/master/install.sh)
+            ff_run_remote_installer "https://raw.githubusercontent.com/alireza0/x-ui/master/install.sh" || return
             ;;
         2)
             read -p "👉 Enter the version to install (e.g., 1.8.0): " version
@@ -6123,7 +6199,7 @@ install_xui_panel() {
                 return
             fi
             echo -e "\n${C_BLUE}⚙️ Installing version ${C_YELLOW}$version...${C_RESET}"
-            VERSION=$version bash <(curl -Ls "https://raw.githubusercontent.com/alireza0/x-ui/$version/install.sh") "$version"
+            VERSION=$version ff_run_remote_installer "https://raw.githubusercontent.com/alireza0/x-ui/$version/install.sh" "$version" || return
             ;;
         0)
             echo -e "\n${C_YELLOW}❌ Installation cancelled.${C_RESET}"
@@ -8802,7 +8878,8 @@ install_openvpn() {
     rm -rf /etc/openvpn/easy-rsa 2>/dev/null
     mkdir -p /etc/openvpn/easy-rsa
     if [[ -f "$EASYRSA_SRC/easyrsa" ]]; then
-        cp -r "$EASYRSA_SRC"/* /etc/openvpn/easy-rsa/
+        cp -r "$EASYRSA_SRC"/* /etc/openvpn/easy-rsa/ || \
+            echo -e "${C_YELLOW}⚠️ Some easy-rsa files may not have copied.${C_RESET}"
     elif [[ -d "$EASYRSA_SRC" ]]; then
         rsync -a "$EASYRSA_SRC"/ /etc/openvpn/easy-rsa/ 2>/dev/null || cp -rn "$EASYRSA_SRC"/* /etc/openvpn/easy-rsa/ 2>/dev/null
     fi
@@ -9154,7 +9231,7 @@ install_slowudp() {
         aarch64) url="https://github.com/slowudp/slowudp/releases/latest/download/slowudp-linux-arm64" ;;
         *) echo -e "${C_RED}❌ Unsupported arch.${C_RESET}"; return ;;
     esac
-    ff_fetch_binary /usr/local/bin/slowudp "$url" 2>/dev/null || {
+    ff_fetch_binary /usr/local/bin/slowudp "$url" || {
         echo -e "${C_YELLOW}⚠️ Binary download failed. Install manually.${C_RESET}"
         return
     }
@@ -9201,7 +9278,7 @@ install_ohp() {
         aarch64) url="https://github.com/ophttp/ohp/releases/latest/download/ohp-linux-arm64" ;;
         *) echo -e "${C_RED}❌ Unsupported arch.${C_RESET}"; return ;;
     esac
-    ff_fetch_binary /usr/local/bin/ohp "$url" 2>/dev/null || {
+    ff_fetch_binary /usr/local/bin/ohp "$url" || {
         echo -e "${C_YELLOW}⚠️ Binary download failed. Install manually.${C_RESET}"
         return
     }
@@ -9310,7 +9387,7 @@ install_udp_request() {
         aarch64) url="https://github.com/udprequest/udp-request/releases/latest/download/udp-request-linux-arm64" ;;
         *) echo -e "${C_RED}❌ Unsupported arch.${C_RESET}"; return ;;
     esac
-    ff_fetch_binary /usr/local/bin/udp-request "$url" 2>/dev/null || {
+    ff_fetch_binary /usr/local/bin/udp-request "$url" || {
         echo -e "${C_YELLOW}⚠️ Binary download failed. Install manually.${C_RESET}"
         return
     }
