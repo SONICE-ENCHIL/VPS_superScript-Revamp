@@ -853,7 +853,7 @@ delete_VPS_superScript_user_accounts() {
         rm -f "$EXPORTS_DIR/${username}.ovpn" "$EXPORTS_DIR/${username}.conf" "$EXPORTS_DIR/${username}-hysteria.json" 2>/dev/null
         # OpenVPN: revoke client cert
         if [[ "$_del_app" == "openvpn" && -f /etc/openvpn/easy-rsa/pki/index.txt ]]; then
-            cd /etc/openvpn/easy-rsa 2>/dev/null && EASYRSA_BATCH=1 ./easyrsa revoke "$username" 2>/dev/null && EASYRSA_BATCH=1 ./easyrsa gen-crl 2>/dev/null
+            ( cd /etc/openvpn/easy-rsa 2>/dev/null && EASYRSA_BATCH=1 ./easyrsa revoke "$username" 2>/dev/null && EASYRSA_BATCH=1 ./easyrsa gen-crl 2>/dev/null )
         fi
         # WireGuard: remove peer
         if [[ "$_del_app" == "wireguard" && -f /etc/wireguard/wg0.conf ]]; then
@@ -2106,7 +2106,7 @@ create_user() {
     # ── OpenVPN per-user config ──
     if [[ "$app" == "openvpn" && -d /etc/openvpn/easy-rsa/pki ]]; then
         local _ovpn_ip; _ovpn_ip=$(curl -s -4 icanhazip.com 2>/dev/null || echo "SERVER_IP")
-        cd /etc/openvpn/easy-rsa 2>/dev/null && EASYRSA_BATCH=1 ./easyrsa build-client-full "$username" nopass 2>/dev/null
+        ( cd /etc/openvpn/easy-rsa 2>/dev/null && EASYRSA_BATCH=1 ./easyrsa build-client-full "$username" nopass 2>/dev/null )
         local _ovpn_file="$EXPORTS_DIR/${username}.ovpn"
         mkdir -p "$EXPORTS_DIR" 2>/dev/null
         cat > "$_ovpn_file" <<OVPNEOF
@@ -3644,12 +3644,27 @@ install_badvpn() {
         return
     }
     echo -e "\n${C_GREEN}📥 Cloning badvpn from github...${C_RESET}"
-    git clone https://github.com/ambrop72/badvpn.git "$BADVPN_BUILD_DIR"
-    cd "$BADVPN_BUILD_DIR" || { echo -e "${C_RED}❌ Failed to change directory to build folder.${C_RESET}"; return; }
+    # Start from a directory we know exists. If a previous run left this shell
+    # parked inside a build dir that was later deleted, git refuses to run at
+    # all ("Unable to read current working directory") and every later step
+    # fails for reasons that look unrelated.
+    cd / 2>/dev/null || true
+    rm -rf "$BADVPN_BUILD_DIR"
+    if ! git clone --depth 1 https://github.com/ambrop72/badvpn.git "$BADVPN_BUILD_DIR"; then
+        echo -e "${C_RED}❌ Failed to clone the badvpn source.${C_RESET}"
+        echo -e "${C_YELLOW}ℹ️ Check network/DNS, then try again.${C_RESET}"
+        rm -rf "$BADVPN_BUILD_DIR"
+        return
+    fi
+    [[ -d "$BADVPN_BUILD_DIR" ]] || { echo -e "${C_RED}❌ Build folder missing after clone.${C_RESET}"; return; }
+    # Build inside a subshell so the menu's own working directory never moves
+    # into a tree we are about to delete on failure.
     echo -e "\n${C_GREEN}⚙️ Running CMake...${C_RESET}"
-    cmake . || { echo -e "${C_RED}❌ CMake configuration failed.${C_RESET}"; rm -rf "$BADVPN_BUILD_DIR"; return; }
+    ( cd "$BADVPN_BUILD_DIR" && cmake . ) || {
+        echo -e "${C_RED}❌ CMake configuration failed.${C_RESET}"; rm -rf "$BADVPN_BUILD_DIR"; return; }
     echo -e "\n${C_GREEN}🛠️ Compiling source...${C_RESET}"
-    make || { echo -e "${C_RED}❌ Compilation (make) failed.${C_RESET}"; rm -rf "$BADVPN_BUILD_DIR"; return; }
+    ( cd "$BADVPN_BUILD_DIR" && make ) || {
+        echo -e "${C_RED}❌ Compilation (make) failed.${C_RESET}"; rm -rf "$BADVPN_BUILD_DIR"; return; }
     local badvpn_binary
     badvpn_binary=$(find "$BADVPN_BUILD_DIR" -name "badvpn-udpgw" -type f | head -n 1)
     if [[ -z "$badvpn_binary" || ! -f "$badvpn_binary" ]]; then
@@ -6953,7 +6968,7 @@ create_trial_account() {
     # ── OpenVPN per-user config ──
     if [[ "$app" == "openvpn" && -d /etc/openvpn/easy-rsa/pki ]]; then
         local _ovpn_ip; _ovpn_ip=$(curl -s -4 icanhazip.com 2>/dev/null || echo "SERVER_IP")
-        cd /etc/openvpn/easy-rsa 2>/dev/null && EASYRSA_BATCH=1 ./easyrsa build-client-full "$username" nopass 2>/dev/null
+        ( cd /etc/openvpn/easy-rsa 2>/dev/null && EASYRSA_BATCH=1 ./easyrsa build-client-full "$username" nopass 2>/dev/null )
         local _ovpn_file="$EXPORTS_DIR/${username}.ovpn"
         mkdir -p "$EXPORTS_DIR" 2>/dev/null
         cat > "$_ovpn_file" <<OVPNEOF
@@ -7170,7 +7185,7 @@ bulk_create_users() {
         # ── OpenVPN per-user config ──
         if [[ "$app" == "openvpn" && -d /etc/openvpn/easy-rsa/pki ]]; then
             local _ovpn_ip; _ovpn_ip=$(curl -s -4 icanhazip.com 2>/dev/null || echo "SERVER_IP")
-            cd /etc/openvpn/easy-rsa 2>/dev/null && EASYRSA_BATCH=1 ./easyrsa build-client-full "$username" nopass 2>/dev/null
+            ( cd /etc/openvpn/easy-rsa 2>/dev/null && EASYRSA_BATCH=1 ./easyrsa build-client-full "$username" nopass 2>/dev/null )
             local _ovpn_file="$EXPORTS_DIR/${username}.ovpn"
             mkdir -p "$EXPORTS_DIR" 2>/dev/null
             cat > "$_ovpn_file" <<OVPNEOF
@@ -8791,11 +8806,18 @@ install_openvpn() {
     elif [[ -d "$EASYRSA_SRC" ]]; then
         rsync -a "$EASYRSA_SRC"/ /etc/openvpn/easy-rsa/ 2>/dev/null || cp -rn "$EASYRSA_SRC"/* /etc/openvpn/easy-rsa/ 2>/dev/null
     fi
-    cd /etc/openvpn/easy-rsa || { echo -e "${C_RED}❌ Failed to change dir.${C_RESET}"; return; }
-    ./easyrsa init-pki 2>/dev/null
-    EASYRSA_BATCH=1 ./easyrsa build-ca nopass 2>/dev/null
-    EASYRSA_BATCH=1 ./easyrsa build-server-full server nopass 2>/dev/null
-    ./easyrsa gen-dh 2>/dev/null
+    # Run easyrsa in a subshell. A bare cd here would leave the menu parked in
+    # /etc/openvpn/easy-rsa, which the rm -rf above deletes on a second install
+    # — stranding the shell in a non-existent directory and breaking git and
+    # other tools for the rest of the session.
+    [[ -x /etc/openvpn/easy-rsa/easyrsa ]] || { echo -e "${C_RED}❌ easyrsa not found after copy.${C_RESET}"; return; }
+    (
+        cd /etc/openvpn/easy-rsa || exit 1
+        ./easyrsa init-pki 2>/dev/null
+        EASYRSA_BATCH=1 ./easyrsa build-ca nopass 2>/dev/null
+        EASYRSA_BATCH=1 ./easyrsa build-server-full server nopass 2>/dev/null
+        ./easyrsa gen-dh 2>/dev/null
+    ) || { echo -e "${C_RED}❌ Failed to enter the easy-rsa directory.${C_RESET}"; return; }
     openvpn --genkey --secret /etc/openvpn/ta.key 2>/dev/null
 
     # Server TCP config
