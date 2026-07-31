@@ -200,6 +200,11 @@ BANNER_CACHE_RAM_USAGE=""
 BANNER_CACHE_CPU_LOAD=""
 BANNER_CACHE_ONLINE_USERS=0
 BANNER_CACHE_TOTAL_USERS=0
+BANNER_CACHE_EXPIRED_USERS=0
+BANNER_CACHE_MEM_TOTAL=""
+BANNER_CACHE_MEM_USED=""
+BANNER_CACHE_MEM_FREE=""
+BANNER_CACHE_MEM_BUFF=""
 SSH_SESSION_CACHE_TTL=10
 SSH_SESSION_CACHE_TS=0
 SSH_SESSION_CACHE_DB_MTIME=0
@@ -6314,12 +6319,25 @@ refresh_banner_cache() {
     fi
     if [[ -s "$DB_FILE" ]]; then
         BANNER_CACHE_TOTAL_USERS=0
-        while IFS=: read -r _u _rest; do
-            [[ -n "$_u" && "$_u" != \#* ]] && (( BANNER_CACHE_TOTAL_USERS++ ))
+        BANNER_CACHE_EXPIRED_USERS=0
+        local _today_ts _exp_ts
+        _today_ts=$(date +%s)
+        while IFS=: read -r _u _p _exp _rest; do
+            [[ -n "$_u" && "$_u" != \#* ]] || continue
+            (( BANNER_CACHE_TOTAL_USERS++ ))
+            _exp_ts=$(date -d "$_exp" +%s 2>/dev/null || echo 0)
+            [[ "$_exp_ts" =~ ^[0-9]+$ ]] && (( _exp_ts > 0 && _exp_ts <= _today_ts )) \
+                && (( BANNER_CACHE_EXPIRED_USERS++ ))
         done < "$DB_FILE"
     else
         BANNER_CACHE_TOTAL_USERS=0
+        BANNER_CACHE_EXPIRED_USERS=0
     fi
+    # Memory figures for the stats block (single free(1) call, not top(1) —
+    # top -b -n1 blocks ~1s and would defeat this cache entirely).
+    read -r BANNER_CACHE_MEM_TOTAL BANNER_CACHE_MEM_USED BANNER_CACHE_MEM_FREE BANNER_CACHE_MEM_BUFF < <(
+        free -m | awk '/^Mem:/{printf "%sM %sM %sM %sM", $2, $3, $4, ($6==""?0:$6)}'
+    )
     BANNER_CACHE_ONLINE_USERS=$(count_managed_online_sessions)
     BANNER_CACHE_TS=$now
 }
@@ -6327,16 +6345,36 @@ refresh_banner_cache() {
 show_banner() {
     refresh_banner_cache
     printf '\033[2J\033[H'
-    echo
-    echo -e "${C_TITLE}          VPS_superScript ${C_RESET}${C_DIM}| Premium Edition V1.0.0         ${C_RESET}"
-    echo -e "${C_BLUE}   ─────────────────────────────────────────────────────${C_RESET}"
-    printf "   ${C_GRAY}◦ %-6s${C_RESET} ${C_GREEN}%-19s${C_RESET} ${C_GRAY}◦ %-6s${C_RESET} ${C_GREEN}%s${C_RESET}\n" "Base" "$BANNER_CACHE_BASE" "Load" "$BANNER_CACHE_CPU_LOAD"
-    printf "   ${C_GRAY}◦ %-6s${C_RESET} ${C_GREEN}%-19s${C_RESET} ${C_GRAY}◦ %-6s${C_RESET} ${C_GREEN}%s${C_RESET}\n" "CPU'S" "$BANNER_CACHE_CPU_COUNT" "Domain" "$BANNER_CACHE_DOMAIN"
-    printf "   ${C_GRAY}◦ %-6s${C_RESET} ${C_GREEN}%-19s${C_RESET} ${C_GRAY}◦ %-6s${C_RESET} ${C_GREEN}%s${C_RESET}\n" "Users" "$BANNER_CACHE_TOTAL_USERS Managed" "UpTime" "$BANNER_CACHE_UP_TIME"
-    printf "   ${C_GRAY}◦ %-6s${C_RESET} ${C_GREEN}%-19s${C_RESET} ${C_GRAY}◦ %-6s${C_RESET} ${C_GREEN}%s${C_RESET}\n" "IP" "$BANNER_CACHE_IP" "OS" "$BANNER_CACHE_OS_NAME"
-    echo -e "${C_BLUE}   ·····················································${C_RESET}"
-    echo -e "   ${C_GRAY}·${C_RESET}${C_TITLE}              🔧 ACTIVE SERVICES               ${C_RESET}${C_GRAY}·${C_RESET}"
-    echo -e "${C_BLUE}   ·····················································${C_RESET}"
+    # ADMcgh-style layout: heavy bars, tight line stacking, no blank spacers.
+    local BAR="${C_BLUE} ═══════════════════════════════════════════════════════════${C_RESET}"
+    local DOT="${C_BLUE}∘${C_RESET}"
+    # Live enforcement indicators — cheap is-active checks, same as the menu items.
+    local _hwid _ushare
+    if systemctl is-active --quiet VPS_superScript-hwid-enforcer 2>/dev/null; then
+        _hwid="${C_RED}[${C_GREEN}ON${C_RED}]${C_RESET}"
+    else
+        _hwid="${C_RED}[OFF]${C_RESET}"
+    fi
+    if systemctl is-active --quiet VPS_superScript-udp-share 2>/dev/null; then
+        _ushare="${C_RED}[${C_GREEN}ON${C_RED}]${C_RESET}"
+    else
+        _ushare="${C_RED}[OFF]${C_RESET}"
+    fi
+    # CPU load colours red above 70% of core count (mirrors ADMcgh's hot-CPU cue)
+    # but uses the cached loadavg rather than a blocking top(1) call.
+    local _cpu_col="$C_GREEN"
+    awk -v l="${BANNER_CACHE_CPU_LOAD:-0}" -v c="${BANNER_CACHE_CPU_COUNT:-1}" \
+        'BEGIN{exit !(l > c*0.7)}' && _cpu_col="$C_RED"
+
+    echo -e "$BAR"
+    echo -e "${C_TITLE}            🦅  Skylartech Inno | Premium  🦅${C_RESET}"
+    echo -e "$BAR"
+    echo -e "  $DOT ${C_YELLOW}ONLINE:${C_RESET} ${C_GREEN}${BANNER_CACHE_ONLINE_USERS}${C_RESET}   $DOT ${C_YELLOW}EXP:${C_RESET} ${C_GREEN}${BANNER_CACHE_EXPIRED_USERS}${C_RESET}   $DOT ${C_YELLOW}HWID:${C_RESET} ${_hwid}   $DOT ${C_YELLOW}UDP-LOCK:${C_RESET} ${_ushare}"
+    echo -e "  $DOT ${C_YELLOW}S.O:${C_RESET} ${C_WHITE}${BANNER_CACHE_OS_NAME}${C_RESET}   $DOT ${C_YELLOW}Base:${C_RESET} ${C_WHITE}${BANNER_CACHE_BASE}${C_RESET}   $DOT ${C_YELLOW}CPU's:${C_RESET} ${C_WHITE}${BANNER_CACHE_CPU_COUNT}${C_RESET}"
+    echo -e "  $DOT ${C_YELLOW}IP:${C_RESET} ${C_GRAY}${BANNER_CACHE_IP}${C_RESET}   $DOT ${C_YELLOW}DATE:${C_RESET} ${C_WHITE}$(date +"%d/%m/%Y")-$(date +"%H:%M")${C_RESET}"
+    echo -e "  $DOT ${C_YELLOW}USERS:${C_RESET} ${C_GREEN}${BANNER_CACHE_TOTAL_USERS} Managed${C_RESET}   $DOT ${C_YELLOW}DOMAIN:${C_RESET} ${C_WHITE}${BANNER_CACHE_DOMAIN}${C_RESET}"
+    echo -e "  $DOT ${C_YELLOW}UPTIME:${C_RESET} ${C_WHITE}${BANNER_CACHE_UP_TIME}${C_RESET}   $DOT ${C_YELLOW}LOAD:${C_RESET} ${_cpu_col}${BANNER_CACHE_CPU_LOAD}${C_RESET}"
+    echo -e "$BAR"
 
     local -a svc_lbl=() svc_val=()
     svc_lbl+=("SSH:"); svc_val+=("22")
@@ -6410,14 +6448,17 @@ show_banner() {
     fi
     
     local i total=${#svc_lbl[@]}
-    for ((i=0; i<total; i+=2)); do
-        if (( i+1 < total )); then
-            printf "   ${C_GRAY}·  ◦ %-12s${C_RESET} ${C_ORANGE}%-7s${C_RESET}  ${C_GRAY}◦ %-12s${C_RESET} ${C_ORANGE}%s${C_RESET}  ${C_GRAY}·${C_RESET}\n" "${svc_lbl[i]}" "${svc_val[i]}" "${svc_lbl[i+1]}" "${svc_val[i+1]}"
-        else
-            printf "   ${C_GRAY}·  ◦ %-12s${C_RESET} ${C_ORANGE}%s${C_RESET}  ${C_GRAY}·${C_RESET}\n" "${svc_lbl[i]}" "${svc_val[i]}"
-        fi
+    for ((i=0; i<total; i+=3)); do
+        local line="  "
+        local j
+        for ((j=i; j<i+3 && j<total; j++)); do
+            line+="${C_BLUE}∘${C_RESET} ${C_YELLOW}${svc_lbl[j]}${C_RESET} ${C_ORANGE}${svc_val[j]}${C_RESET}   "
+        done
+        echo -e "$line"
     done
-    echo -e "${C_BLUE}   ·····················································${C_RESET}"
+    echo -e "  ${C_BLUE}∘${C_RESET} ${C_YELLOW}TOTAL:${C_RESET} ${C_GREEN}${BANNER_CACHE_MEM_TOTAL}${C_RESET}   ${C_BLUE}∘${C_RESET} ${C_YELLOW}FREE:${C_RESET} ${C_GREEN}${BANNER_CACHE_MEM_FREE}${C_RESET}   ${C_BLUE}∘${C_RESET} ${C_YELLOW}IN USE:${C_RESET} ${C_GREEN}${BANNER_CACHE_MEM_USED}${C_RESET}"
+    echo -e "  ${C_BLUE}∘${C_RESET} ${C_YELLOW}U/RAM:${C_RESET} ${C_GREEN}${BANNER_CACHE_RAM_USAGE}%${C_RESET}   ${C_BLUE}∘${C_RESET} ${C_YELLOW}BUFFER:${C_RESET} ${C_GREEN}${BANNER_CACHE_MEM_BUFF}${C_RESET}"
+    echo -e "${C_BLUE} ═══════════════════════════════════════════════════════════${C_RESET}"
 }
 
 protocol_menu() {
@@ -8314,57 +8355,84 @@ integrations_hub() {
     done
 }
 
+# ADMcgh-style menu item: magenta brackets, green number, yellow arrow,
+# white label. $3 is an optional trailing marker (e.g. "▸" for submenus).
+_mi() {
+    echo -e "  ${C_PURPLE}[${C_GREEN}${1}${C_PURPLE}]${C_RESET} ${C_WARN}⇨${C_RESET} ${C_WHITE}${2}${C_RESET}${3:+ ${C_WARN}${3}${C_RESET}}"
+}
+
+# Two-column variant for dense submenus. Uses absolute cursor columns
+# (\033[Ng) rather than %-Ns padding because several labels start with
+# variation-selector emoji (🗑️ ⚙️ 👁️) that render 1 or 2 cells depending on
+# the terminal — printf padding would drift, absolute columns cannot.
+_mi2() {
+    printf "\033[3G${C_PURPLE}[${C_GREEN}%s${C_PURPLE}]${C_RESET}\033[9G${C_WARN}⇨${C_RESET} ${C_WHITE}%s${C_RESET}\033[36G${C_PURPLE}[${C_GREEN}%s${C_PURPLE}]${C_RESET}\033[42G${C_WARN}⇨${C_RESET} ${C_WHITE}%s${C_RESET}\033[K\n" \
+        "$1" "$2" "$3" "$4"
+}
+
+# The ten user-management actions, moved off the main menu into their own hub
+# so the top level stays at seven entries (ADMcgh shape).
+user_control_hub() {
+    while true; do
+        show_banner
+        echo -e "  ${C_TITLE}                  👤 USER CONTROL${C_RESET}"
+        echo -e "${C_BLUE} ═══════════════════════════════════════════════════════════${C_RESET}"
+        _mi2 "01" "🌟 CREATE USER"  "06" "📝 EDIT USER"
+        _mi2 "02" "🗑️ DELETE USER"  "07" "📋 LIST USERS"
+        _mi2 "03" "🔄 RENEW USER"   "08" "👁️ USER DETAILS"
+        _mi2 "04" "🔒 LOCK USER"    "09" "📱 USER CONFIG"
+        _mi2 "05" "🔓 UNLOCK USER"  "10" "➕ MORE USERS ▸"
+        echo -e "${C_BLUE} ═══════════════════════════════════════════════════════════${C_RESET}"
+        echo -e "  ${C_PURPLE}[${C_GREEN}0${C_PURPLE}]${C_RESET} ${C_WARN}⇦${C_RESET} ${C_DIM}${C_WARN}[ BACK ]${C_RESET}"
+        echo -e "${C_BLUE} ═══════════════════════════════════════════════════════════${C_RESET}"
+        if ! read -r -p "$(echo -e ${C_PROMPT}"👉 Select an option: "${C_RESET})" uchoice; then
+            echo; return
+        fi
+        case $uchoice in
+            01|1) create_user; press_enter ;;
+            02|2) delete_user; press_enter ;;
+            03|3) renew_user; press_enter ;;
+            04|4) lock_user; press_enter ;;
+            05|5) unlock_user; press_enter ;;
+            06|6) edit_user; press_enter ;;
+            07|7) list_users; press_enter ;;
+            08|8) view_user_details ;;
+            09|9) client_config_menu; press_enter ;;
+            10) more_users_hub ;;
+            0) return ;;
+            *) invalid_option ;;
+        esac
+    done
+}
+
 main_menu() {
     while true; do
         export UNINSTALL_MODE="interactive"
         show_banner
 
-        echo
-        echo -e "   ${C_TITLE}─────────────────────────────────────────────────────${C_RESET}"
-        echo -e "   ${C_TITLE}              👤 USER MANAGEMENT              ${C_RESET}"
-        echo -e "   ${C_TITLE}─────────────────────────────────────────────────────${C_RESET}"
-        printf "\033[6G${C_CHOICE}[%2s]${C_RESET}\033[11G%-28s\033[40G${C_CHOICE}[%2s]${C_RESET}\033[45G%-28s\033[K\n" "1" "🌟 Create User" "6" "📝 Edit User"
-        printf "\033[6G${C_CHOICE}[%2s]${C_RESET}\033[11G%-28s\033[40G${C_CHOICE}[%2s]${C_RESET}\033[45G%-28s\033[K\n" "2" "🗑️ Delete User" "7" "📋 List Users"
-        printf "\033[6G${C_CHOICE}[%2s]${C_RESET}\033[11G%-28s\033[40G${C_CHOICE}[%2s]${C_RESET}\033[45G%-28s\033[K\n" "3" "🔄 Renew User" "8" "👁️ User Details"
-        printf "\033[6G${C_CHOICE}[%2s]${C_RESET}\033[11G%-28s\033[40G${C_CHOICE}[%2s]${C_RESET}\033[45G%-28s\033[K\n" "4" "🔒 Lock User" "9" "📱 User Config"
-        printf "\033[6G${C_CHOICE}[%2s]${C_RESET}\033[11G%-28s\033[40G${C_ORANGE}[%2s]${C_RESET}\033[45G%-28s\033[K\n" "5" "🔓 Unlock User" "10" "➕ More Users ▸"
-
-        echo
-        echo -e "   ${C_TITLE}─────────────────────────────────────────────────────${C_RESET}"
-        echo -e "   ${C_TITLE}              🧭 MANAGEMENT HUBS              ${C_RESET}"
-        echo -e "   ${C_TITLE}─────────────────────────────────────────────────────${C_RESET}"
-        printf "\033[6G${C_CHOICE}[%2s]${C_RESET}\033[11G%-28s\033[40G${C_CHOICE}[%2s]${C_RESET}\033[45G%-28s\033[K\n" "11" "🔌 Protocols & Services ▸" "14" "🌐 Network & Ports ▸"
-        printf "\033[6G${C_CHOICE}[%2s]${C_RESET}\033[11G%-28s\033[40G${C_CHOICE}[%2s]${C_RESET}\033[45G%-28s\033[K\n" "12" "📊 Monitoring & Traffic ▸" "15" "⚙️ System & Server ▸"
-        printf "\033[6G${C_CHOICE}[%2s]${C_RESET}\033[11G%-28s\033[40G${C_CHOICE}[%2s]${C_RESET}\033[45G%-28s\033[K\n" "13" "🎨 Access & Content ▸" "16" "🤖 Integrations ▸"
-
-        echo
-        echo -e "   ${C_DANGER}─────────────────────────────────────────────────────${C_RESET}"
-        echo -e "   ${C_DANGER}                🔥 DANGER ZONE                 ${C_RESET}"
-        echo -e "   ${C_DANGER}─────────────────────────────────────────────────────${C_RESET}"
-        echo -e "     ${C_DANGER}[99]${C_RESET} Uninstall Script             ${C_WARN}[ 0]${C_RESET} Exit"
-        echo
+        # Tight ADMcgh-style item list: no blank spacers, one hub per line.
+        _mi "01" "👤 USER CONTROL (CREATE/DELETE/RENEW/LOCK)" "▸"
+        _mi "02" "🔌 PROTOCOLS & SERVICES" "▸"
+        _mi "03" "📊 MONITORING & TRAFFIC" "▸"
+        _mi "04" "🎨 ACCESS & CONTENT" "▸"
+        _mi "05" "🌐 NETWORK & PORTS" "▸"
+        _mi "06" "⚙️ SYSTEM & SERVER" "▸"
+        _mi "07" "🤖 INTEGRATIONS" "▸"
+        echo -e "${C_BLUE} ═══════════════════════════════════════════════════════════${C_RESET}"
+        echo -e "  ${C_PURPLE}[${C_GREEN}99${C_PURPLE}]${C_RESET} ${C_WARN}⇨${C_RESET} ${C_WARN}[!]${C_RESET} ${C_DANGER}🔥 UNINSTALL SCRIPT${C_RESET}   ${C_GRAY}|${C_RESET}   ${C_PURPLE}[${C_GREEN}0${C_PURPLE}]${C_RESET} ${C_WARN}⇦${C_RESET} ${C_DIM}${C_WARN}[ EXIT ]${C_RESET}"
+        echo -e "${C_BLUE} ═══════════════════════════════════════════════════════════${C_RESET}"
         if ! read -r -p "$(echo -e ${C_PROMPT}"👉 Select an option: "${C_RESET})" choice; then
             echo
             exit 0
         fi
         case $choice in
-            1) create_user; press_enter ;;
-            2) delete_user; press_enter ;;
-            3) renew_user; press_enter ;;
-            4) lock_user; press_enter ;;
-            5) unlock_user; press_enter ;;
-            6) edit_user; press_enter ;;
-            7) list_users; press_enter ;;
-            8) view_user_details ;;
-            9) client_config_menu; press_enter ;;
-            10) more_users_hub ;;
-
-            11) protocols_hub ;;
-            12) monitoring_hub ;;
-            13) access_hub ;;
-            14) network_hub ;;
-            15) system_hub ;;
-            16) integrations_hub ;;
+            01|1) user_control_hub ;;
+            02|2) protocols_hub ;;
+            03|3) monitoring_hub ;;
+            04|4) access_hub ;;
+            05|5) network_hub ;;
+            06|6) system_hub ;;
+            07|7) integrations_hub ;;
 
             99) uninstall_script ;;
             0) exit 0 ;;
