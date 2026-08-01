@@ -8536,6 +8536,552 @@ system_hub() {
     done
 }
 
+# ═══════════════════════════════════════════════════════════════════════════
+#  GCP CLOUD RUN — VLESS DEPLOYER
+#  Deploys a VLESS (xray) proxy container to Google Cloud Run. Two flavours:
+#    • Own Project  — any region, always-on, billed to the user's own GCP
+#                     project (unlimited lifetime).
+#    • Qwiklabs Lab — locked to us-central1, for the throwaway 5-hour lab
+#                     sandbox (upstream saekacutie/script behaviour).
+#  Unlike the local protocols above, these run on Google's cloud, not this
+#  server — so they live here under Integrations, not in the systemd grid.
+# ═══════════════════════════════════════════════════════════════════════════
+GCP_VLESS_URI_FILE="$DB_DIR/gcp-vless-uri.txt"
+
+# Stage all container build assets into $1 (a build dir). Faithful copies of
+# the upstream saekacutie/script files, with a freshly generated UUID so every
+# deployment gets unique credentials instead of the shared hard-coded one.
+_gcp_vless_write_assets() {
+    local d="$1"
+    local uuid
+    if [[ -r /proc/sys/kernel/random/uuid ]]; then
+        uuid=$(cat /proc/sys/kernel/random/uuid)
+    elif command -v uuidgen &>/dev/null; then
+        uuid=$(uuidgen | tr '[:upper:]' '[:lower:]')
+    else
+        uuid=$(python3 -c 'import uuid;print(uuid.uuid4())' 2>/dev/null)
+    fi
+    [[ -n "$uuid" ]] || uuid="9e507b33-65b6-40a4-b37f-eabad158b645"
+
+    cat > "$d/config.json" <<EOF
+{
+  "log": { "loglevel": "none" },
+  "inbounds": [
+    {
+      "listen": "0.0.0.0",
+      "port": 8080,
+      "protocol": "vless",
+      "settings": {
+        "clients": [
+          { "id": "${uuid}" }
+        ],
+        "decryption": "none",
+        "fallbacks": [
+          { "path": "/prvtspyyy", "dest": "@xhttp" },
+          { "dest": "@dashboard" }
+        ]
+      },
+      "streamSettings": {
+        "network": "xhttp",
+        "security": "none",
+        "xhttpSettings": {
+          "path": "/prvtspyyy",
+          "host": ["*"],
+          "method": "GET",
+          "maxConnections": 200,
+          "maxConcurrentStreams": 200,
+          "idleTimeout": 300,
+          "pingTimeout": 100
+        }
+      },
+      "sniffing": {
+        "enabled": true,
+        "destOverride": ["http", "tls"]
+      }
+    },
+    {
+      "tag": "xhttp",
+      "listen": "127.0.0.1",
+      "port": 8082,
+      "protocol": "vless",
+      "settings": { "clients": [], "decryption": "none" },
+      "streamSettings": { "network": "xhttp" }
+    },
+    {
+      "tag": "dashboard",
+      "listen": "127.0.0.1",
+      "port": 8081,
+      "protocol": "http",
+      "settings": {
+        "response": {
+          "status": 200,
+          "headers": { "Content-Type": ["text/plain", "text/html"] },
+          "body": "Prvtspyyy404"
+        }
+      }
+    }
+  ],
+  "outbounds": [
+    { "protocol": "freedom", "settings": { "domainStrategy": "UseIPv4" } }
+  ]
+}
+EOF
+
+    cat > "$d/Dockerfile" <<'EOF'
+FROM teddysun/xray:latest
+RUN apk add --no-cache python3 sqlite curl bash
+COPY config.json /etc/xray/config.json
+COPY entrypoint.sh /entrypoint.sh
+COPY server.py /server.py
+COPY log-user.sh /log-user.sh
+COPY network-monitor.sh /network-monitor.sh
+COPY ip-manager.sh /ip-manager.sh
+RUN chmod +x /entrypoint.sh /server.py /log-user.sh /network-monitor.sh /ip-manager.sh
+EXPOSE 8080
+ENTRYPOINT ["/entrypoint.sh"]
+EOF
+
+    cat > "$d/entrypoint.sh" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+sed -i "s/8080/$PORT/g" /etc/xray/config.json
+echo "[1] Port set to: $PORT"
+python3 /server.py --host 127.0.0.1 --port 8081 &
+sleep 1
+/ip-manager.sh start &
+sleep 1
+echo "[2] Starting Xray Core..."
+/usr/bin/xray run -c /etc/xray/config.json &
+echo "[3] Waiting for port $PORT to open..."
+until nc -z 127.0.0.1 $PORT; do
+  sleep 0.2
+done
+echo "[OK] SUCCESS: Listening on $PORT — Ready!"
+wait
+EOF
+
+    cat > "$d/server.py" <<'EOF'
+#!/usr/bin/env python3
+import sqlite3, json, os, time, argparse
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import urlparse
+from datetime import datetime
+import threading
+
+DB_FILE = "/tmp/vless_users.db"
+IP_FILE = "/tmp/remote_ips.txt"
+START_TIME = time.time()
+
+def init_db():
+    with sqlite3.connect(DB_FILE) as c:
+        c.execute('''CREATE TABLE IF NOT EXISTS connections (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, source_ip TEXT UNIQUE,
+            connected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            duration TEXT DEFAULT '00:00:00', status TEXT DEFAULT 'ACTIVE'
+        )''')
+
+def update_ip_file():
+    while True:
+        try:
+            with sqlite3.connect(DB_FILE) as c:
+                ips = [r[0] for r in c.execute("SELECT source_ip FROM connections WHERE status='ACTIVE' ORDER BY last_seen DESC").fetchall()]
+            with open(IP_FILE, 'w') as f:
+                f.write(f"# Updated: {datetime.now()}\n# Total: {len(ips)}\n\n" + "\n".join(ips))
+        except: pass
+        time.sleep(10)
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        p = urlparse(self.path)
+        if p.path == '/health':
+            self.send(200, 'text/plain', b'healthy')
+        elif p.path == '/remote_ips.txt':
+            self.serve_file()
+        elif p.path == '/api/stats':
+            self.serve_stats()
+        elif p.path == '/api/connections':
+            self.serve_conns()
+        elif p.path == '/':
+            self.serve_dash()
+        else:
+            self.send(404, 'text/plain', b'Not Found')
+
+    def send(self, code, ctype, data):
+        self.send_response(code)
+        self.send_header('Content-Type', ctype)
+        self.end_headers()
+        self.wfile.write(data)
+
+    def serve_file(self):
+        if os.path.exists(IP_FILE):
+            self.send(200, 'text/plain', open(IP_FILE,'rb').read())
+        else: self.send(404,'text/plain',b'No file')
+
+    def serve_stats(self):
+        uptime = int(time.time()-START_TIME)
+        with sqlite3.connect(DB_FILE) as c:
+            active = c.execute("SELECT COUNT(*) FROM connections WHERE status='ACTIVE'").fetchone()[0]
+        data = json.dumps({'active':active,'uptime':uptime})
+        self.send(200,'application/json',data.encode())
+
+    def serve_conns(self):
+        with sqlite3.connect(DB_FILE) as c:
+            res = c.execute("SELECT * FROM connections").fetchall()
+        self.send(200,'application/json',json.dumps(res).encode())
+
+    def serve_dash(self):
+        html = f'''<!DOCTYPE html><html><head><meta charset=utf-8><title>VLESS+XHTTP</title>
+<style>body{{background:#0a0e27;color:#e0e0e0;font-family:monospace;padding:20px}}
+.box{{background:#111;border-left:3px solid #0f8;padding:15px;margin:10px 0}}</style></head>
+<body><h1 style="color:#0f8">VLESS Manager</h1>
+<div class=box><b>Status:</b> ONLINE<br><b>Protocol:</b> VLESS+XHTTP<br><b>Uptime:</b> {int(time.time()-START_TIME)}s<br>
+<b>IP List:</b> <a href=/remote_ips.txt style="color:#0f8">/remote_ips.txt</a></div></body></html>'''
+        self.send(200,'text/html',html.encode())
+
+if __name__ == '__main__':
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--host',default='127.0.0.1')
+    ap.add_argument('--port',type=int,default=8081)
+    a = ap.parse_args()
+    init_db()
+    threading.Thread(target=update_ip_file,daemon=True).start()
+    HTTPServer((a.host,a.port),Handler).serve_forever()
+EOF
+
+    cat > "$d/ip-manager.sh" <<'EOF'
+#!/bin/sh
+DB="/tmp/vless_users.db"
+IP_FILE="/tmp/remote_ips.txt"
+case "$1" in
+  start)
+    while true; do
+      sqlite3 "$DB" "SELECT source_ip FROM connections WHERE status='ACTIVE' ORDER BY last_seen DESC;" 2>/dev/null > "$IP_FILE.tmp"
+      mv "$IP_FILE.tmp" "$IP_FILE"
+      sleep 10
+    done
+    ;;
+  list) echo "=== Active Remote IPs ==="; cat "$IP_FILE" ;;
+  count) echo "Total Active: $(wc -l < "$IP_FILE")" ;;
+  block)
+    [ -z "$2" ] && echo "Usage: block <IP>" && exit 1
+    sqlite3 "$DB" "UPDATE connections SET is_blocked=1, status='BLOCKED' WHERE source_ip='$2';"
+    echo "Blocked: $2" ;;
+  unblock)
+    [ -z "$2" ] && echo "Usage: unblock <IP>" && exit 1
+    sqlite3 "$DB" "UPDATE connections SET is_blocked=0, status='ACTIVE' WHERE source_ip='$2';"
+    echo "Unblocked: $2" ;;
+  blocked)
+    echo "=== Blocked IPs ==="
+    sqlite3 "$DB" "SELECT source_ip FROM connections WHERE status='BLOCKED';" ;;
+  *) echo "VLESS+XHTTP IP Manager"; echo "Usage: $0 [list|count|block <IP>|unblock <IP>|blocked]" ;;
+esac
+EOF
+
+    cat > "$d/log-user.sh" <<'EOF'
+#!/bin/sh
+DB="/tmp/vless_users.db"
+[ ! -f "$DB" ] && sqlite3 "$DB" "CREATE TABLE IF NOT EXISTS connections (id INTEGER PRIMARY KEY AUTOINCREMENT,source_ip TEXT UNIQUE,connected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,is_blocked BOOLEAN DEFAULT 0);" 2>/dev/null
+[ -n "$1" ] && sqlite3 "$DB" "INSERT OR REPLACE INTO connections (source_ip,last_seen) VALUES ('$1',CURRENT_TIMESTAMP);" 2>/dev/null
+EOF
+
+    cat > "$d/network-monitor.sh" <<'EOF'
+#!/bin/bash
+SERVICE_NAME="${1:-vless-xhttp}"
+REGION="${2:-us-central1}"
+SERVICE_URL=$(gcloud run services describe "$SERVICE_NAME" --region="$REGION" --format='value(status.url)' 2>/dev/null)
+[ -z "$SERVICE_URL" ] && echo "[!] Service not found" && exit 1
+LOG_DIR="$HOME/vless-logs"
+mkdir -p "$LOG_DIR"
+LOG_FILE="$LOG_DIR/status-$(date +%Y%m%d).log"
+INTERVAL=30
+echo "[*] Monitor started: $SERVICE_URL"
+trap 'exit 0' INT
+while true; do
+    TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
+    RESULT=$(curl -o /dev/null -s -w "%{time_total}|%{http_code}" --max-time 5 "${SERVICE_URL}/health" 2>/dev/null)
+    if [ -n "$RESULT" ]; then
+        CODE=$(echo "$RESULT" | cut -d'|' -f2)
+        [ "$CODE" = "200" ] && STATUS="UP" || STATUS="WARN"
+        LOG_ENTRY="$TIMESTAMP | $STATUS | HTTP $CODE"
+    else
+        LOG_ENTRY="$TIMESTAMP | DOWN | Timeout"
+    fi
+    echo "$LOG_ENTRY" >> "$LOG_FILE"
+    sleep "$INTERVAL"
+done
+EOF
+
+    chmod +x "$d"/*.sh "$d/server.py" 2>/dev/null || true
+    GCP_VLESS_LAST_UUID="$uuid"
+}
+
+# Confirm gcloud + docker are present and the user is authenticated. Returns
+# non-zero (with a printed explanation) if the environment can't deploy.
+_gcp_vless_preflight() {
+    if ! command -v gcloud &>/dev/null; then
+        echo -e "${C_RED}❌ 'gcloud' CLI not found.${C_RESET}"
+        echo -e "${C_DIM}   This deployer runs where the Google Cloud SDK is installed —${C_RESET}"
+        echo -e "${C_DIM}   e.g. Google Cloud Shell, or a machine with gcloud + docker.${C_RESET}"
+        echo -e "${C_DIM}   Install: https://cloud.google.com/sdk/docs/install${C_RESET}"
+        return 1
+    fi
+    if ! command -v docker &>/dev/null; then
+        echo -e "${C_RED}❌ 'docker' not found.${C_RESET}"
+        echo -e "${C_DIM}   The container image is built locally with docker before push.${C_RESET}"
+        return 1
+    fi
+    if ! gcloud auth list --filter=status:ACTIVE --format='value(account)' 2>/dev/null | grep -q .; then
+        echo -e "${C_YELLOW}⚠️ No active gcloud account. Run:${C_RESET} ${C_CYAN}gcloud auth login${C_RESET}"
+        return 1
+    fi
+    return 0
+}
+
+# Shared build → push → deploy engine.
+#   $1 project  $2 region  $3 service  $4 cpu  $5 memory
+_gcp_vless_deploy_engine() {
+    local project="$1" region="$2" service="$3" cpu="$4" memory="$5"
+    local build_dir image uuid ws_path service_url clean_host vless_uri
+
+    build_dir=$(mktemp -d 2>/dev/null || echo "/tmp/VPS_superScript-gcp-vless.$$")
+    mkdir -p "$build_dir"
+    echo -e "${C_CYAN}[*]${C_RESET} Staging container assets in ${C_DIM}${build_dir}${C_RESET}"
+    _gcp_vless_write_assets "$build_dir"
+
+    echo -e "${C_CYAN}[*]${C_RESET} Enabling required APIs (run, containerregistry, cloudbuild)..."
+    gcloud services enable run.googleapis.com containerregistry.googleapis.com cloudbuild.googleapis.com --quiet 2>/dev/null || true
+
+    uuid=$(grep -o '"id": *"[^"]*"' "$build_dir/config.json" | cut -d'"' -f4 | head -n1)
+    ws_path=$(grep -o '"path": *"[^"]*"' "$build_dir/config.json" | cut -d'"' -f4 | head -n1)
+    image="gcr.io/${project}/${service}:latest"
+
+    echo -e "${C_CYAN}[*]${C_RESET} Building image ${C_DIM}${image}${C_RESET} ..."
+    if ! ( cd "$build_dir" && docker build -t "$image" . ); then
+        echo -e "${C_RED}❌ Build failed.${C_RESET}"; rm -rf "$build_dir"; return 1
+    fi
+    echo -e "${C_CYAN}[*]${C_RESET} Pushing image to Container Registry..."
+    if ! docker push "$image"; then
+        echo -e "${C_RED}❌ Push failed. Run:${C_RESET} ${C_CYAN}gcloud auth configure-docker${C_RESET}"
+        rm -rf "$build_dir"; return 1
+    fi
+
+    echo -e "${C_CYAN}[*]${C_RESET} Deploying to Cloud Run in ${C_WHITE}${region}${C_RESET} ..."
+    if ! gcloud run deploy "$service" \
+        --image "$image" \
+        --platform managed \
+        --region "$region" \
+        --allow-unauthenticated \
+        --port 8080 \
+        --cpu "$cpu" \
+        --memory "$memory" \
+        --cpu-boost \
+        --concurrency 1000 \
+        --timeout 3600 \
+        --min-instances 1 \
+        --max-instances 1 \
+        --no-cpu-throttling \
+        --session-affinity \
+        --quiet; then
+        echo -e "${C_RED}❌ Deployment failed (see error above).${C_RESET}"
+        rm -rf "$build_dir"; return 1
+    fi
+
+    service_url=$(gcloud run services describe "$service" --region "$region" --format='value(status.url)' 2>/dev/null)
+    clean_host=$(echo "$service_url" | sed 's|https://||')
+    vless_uri="vless://${uuid}@${clean_host}:443?encryption=none&security=tls&type=ws&path=%2F${ws_path#/}&host=${clean_host}&sni=${clean_host}&fp=chrome#${service}"
+
+    mkdir -p "$DB_DIR" 2>/dev/null
+    echo "$vless_uri" > "$GCP_VLESS_URI_FILE"
+
+    echo
+    echo -e "${C_GREEN}════════════════════════════════════════════════════════════${C_RESET}"
+    echo -e "  ${C_GREEN}✅ DEPLOYMENT SUCCESSFUL${C_RESET}"
+    echo -e "${C_GREEN}════════════════════════════════════════════════════════════${C_RESET}"
+    echo -e "  ${C_ACCENT}Service:${C_RESET}   ${C_WHITE}${service}${C_RESET}"
+    echo -e "  ${C_ACCENT}Address:${C_RESET}   ${C_WHITE}www.gstatic.com${C_RESET}"
+    echo -e "  ${C_ACCENT}SNI:${C_RESET}       ${C_WHITE}firebase-settings.crashlytics.com${C_RESET}"
+    echo -e "  ${C_ACCENT}Host:${C_RESET}      ${C_WHITE}${clean_host}${C_RESET}"
+    echo -e "  ${C_ACCENT}Port:${C_RESET}      ${C_WHITE}443${C_RESET}"
+    echo -e "  ${C_ACCENT}UUID:${C_RESET}      ${C_WHITE}${uuid}${C_RESET}"
+    echo -e "  ${C_ACCENT}WS Path:${C_RESET}   ${C_WHITE}${ws_path}${C_RESET}"
+    echo -e "  ${C_ACCENT}Transport:${C_RESET} ${C_WHITE}WebSocket (ws) over TLS${C_RESET}"
+    echo -e "  ${C_ACCENT}Region:${C_RESET}    ${C_WHITE}${region}${C_RESET}"
+    echo -e "  ${C_ACCENT}CPU/RAM:${C_RESET}   ${C_WHITE}${cpu} vCPU / ${memory}${C_RESET}"
+    echo -e "${C_GREEN}════════════════════════════════════════════════════════════${C_RESET}"
+    echo -e "  ${C_PLAIN:-}${C_WHITE}Import URI:${C_RESET}"
+    echo -e "  ${C_CYAN}${vless_uri}${C_RESET}"
+    echo -e "${C_GREEN}════════════════════════════════════════════════════════════${C_RESET}"
+    echo -e "  ${C_DIM}URI saved to: ${GCP_VLESS_URI_FILE}${C_RESET}"
+
+    rm -rf "$build_dir"
+    return 0
+}
+
+# Prompt for a Cloud Run service name (lowercase, RFC1035-safe) with a default.
+_gcp_vless_prompt_service() {
+    local default="$1" input name
+    read -r -p "$(echo -e ${C_PROMPT}"👉 Service name [default: ${default}]: "${C_RESET})" input
+    name="${input:-$default}"
+    name=$(echo "$name" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g; s/--*/-/g; s/^-//; s/-$//')
+    [[ -n "$name" ]] || name="$default"
+    printf '%s' "$name"
+}
+
+# Prompt for CPU/RAM. Echoes "CPU|MEMORY".
+_gcp_vless_prompt_cpu_ram() {
+    local choice cpu memory
+    echo -e "  ${C_ACCENT}[1]${C_RESET} 1 vCPU, 1 GiB RAM" >&2
+    echo -e "  ${C_ACCENT}[2]${C_RESET} 1 vCPU, 2 GiB RAM" >&2
+    echo -e "  ${C_ACCENT}[3]${C_RESET} 2 vCPU, 2 GiB RAM" >&2
+    echo -e "  ${C_ACCENT}[4]${C_RESET} 2 vCPU, 4 GiB RAM ${C_GREEN}(RECOMMENDED)${C_RESET}" >&2
+    echo -e "  ${C_ACCENT}[5]${C_RESET} 4 vCPU, 8 GiB RAM" >&2
+    echo -e "  ${C_ACCENT}[6]${C_RESET} 4 vCPU, 16 GiB RAM" >&2
+    read -r -p "$(echo -e ${C_PROMPT}"👉 Select [1-6] [default: 4]: "${C_RESET})" choice
+    choice="${choice:-4}"
+    case $choice in
+        1) cpu="1"; memory="1Gi" ;;
+        2) cpu="1"; memory="2Gi" ;;
+        3) cpu="2"; memory="2Gi" ;;
+        4) cpu="2"; memory="4Gi" ;;
+        5) cpu="4"; memory="8Gi" ;;
+        6) cpu="4"; memory="16Gi" ;;
+        *) cpu="2"; memory="4Gi" ;;
+    esac
+    printf '%s|%s' "$cpu" "$memory"
+}
+
+# [01] Own project — any region, unlimited/always-on, billed to the user.
+deploy_gcp_vless_ownproject() {
+    clear; show_banner
+    echo -e "  ${C_TITLE}   🚀 GCP CLOUD RUN VLESS — DEPLOY TO YOUR OWN PROJECT${C_RESET}"
+    echo -e "${C_BLUE} ═══════════════════════════════════════════════════════════${C_RESET}"
+    echo -e "  ${C_DIM}Always-on (min-instances=1). Billed to your GCP project.${C_RESET}"
+    echo -e "  ${C_DIM}Rough cost of a warm instance: ~\$25–45/mo. Cloud Run ToS${C_RESET}"
+    echo -e "  ${C_DIM}restricts proxy/VPN use — deploy only on a project you own.${C_RESET}"
+    echo
+    _gcp_vless_preflight || { return 1; }
+
+    local cur_project project region svc cpuram cpu memory
+    cur_project=$(gcloud config get-value project 2>/dev/null)
+    read -r -p "$(echo -e ${C_PROMPT}"👉 GCP Project ID [default: ${cur_project:-none}]: "${C_RESET})" project
+    project="${project:-$cur_project}"
+    if [[ -z "$project" ]]; then
+        echo -e "${C_RED}❌ A project ID is required.${C_RESET}"; return 1
+    fi
+    gcloud config set project "$project" --quiet 2>/dev/null
+
+    # Billing must be enabled or Cloud Run / build will fail.
+    if command -v gcloud &>/dev/null; then
+        local billing
+        billing=$(gcloud beta billing projects describe "$project" --format='value(billingEnabled)' 2>/dev/null)
+        if [[ "$billing" != "True" && "$billing" != "true" ]]; then
+            echo -e "${C_YELLOW}⚠️ Billing does not appear to be enabled on '${project}'.${C_RESET}"
+            echo -e "${C_DIM}   Cloud Run always-on requires an active billing account.${C_RESET}"
+            read -r -p "$(echo -e ${C_PROMPT}"Continue anyway? [y/N]: "${C_RESET})" go
+            [[ "$go" =~ ^[Yy]$ ]] || return 1
+        fi
+    fi
+
+    read -r -p "$(echo -e ${C_PROMPT}"👉 Region [default: us-central1]: "${C_RESET})" region
+    region="${region:-us-central1}"
+    svc=$(_gcp_vless_prompt_service "vless-xhttp")
+    echo
+    cpuram=$(_gcp_vless_prompt_cpu_ram)
+    cpu="${cpuram%%|*}"; memory="${cpuram##*|}"
+    echo
+    _gcp_vless_deploy_engine "$project" "$region" "$svc" "$cpu" "$memory"
+}
+
+# [02] Qwiklabs lab — locked to us-central1 (lab org policy), throwaway.
+deploy_gcp_vless_lab() {
+    clear; show_banner
+    echo -e "  ${C_TITLE}   🧪 GCP CLOUD RUN VLESS — QWIKLABS LAB${C_RESET}"
+    echo -e "${C_BLUE} ═══════════════════════════════════════════════════════════${C_RESET}"
+    echo -e "  ${C_DIM}For the temporary Qwiklabs / Cloud Skills Boost sandbox.${C_RESET}"
+    echo -e "  ${C_DIM}Region is locked to us-central1 by lab org policy. The lab${C_RESET}"
+    echo -e "  ${C_DIM}project is torn down at the end of its timed session.${C_RESET}"
+    echo
+    _gcp_vless_preflight || { return 1; }
+
+    local project region="us-central1" svc cpuram cpu memory
+    project=$(gcloud config get-value project 2>/dev/null)
+    if [[ -z "$project" ]]; then
+        echo -e "${C_RED}❌ No active project. Open this inside the Qwiklabs Cloud Shell.${C_RESET}"
+        return 1
+    fi
+    echo -e "  ${C_ACCENT}Project:${C_RESET} ${C_WHITE}${project}${C_RESET}   ${C_ACCENT}Region:${C_RESET} ${C_WHITE}${region}${C_RESET} ${C_DIM}(locked)${C_RESET}"
+    echo
+    svc=$(_gcp_vless_prompt_service "prvtspyyy404")
+    echo
+    cpuram=$(_gcp_vless_prompt_cpu_ram)
+    cpu="${cpuram%%|*}"; memory="${cpuram##*|}"
+    echo
+    _gcp_vless_deploy_engine "$project" "$region" "$svc" "$cpu" "$memory"
+}
+
+# [03] Show the most recently deployed VLESS URI.
+gcp_vless_show_uri() {
+    clear; show_banner
+    echo -e "  ${C_TITLE}   📋 LAST VLESS URI${C_RESET}"
+    echo -e "${C_BLUE} ═══════════════════════════════════════════════════════════${C_RESET}"
+    if [[ -s "$GCP_VLESS_URI_FILE" ]]; then
+        echo -e "  ${C_CYAN}$(cat "$GCP_VLESS_URI_FILE")${C_RESET}"
+    else
+        echo -e "  ${C_DIM}No deployment recorded yet. Deploy first (option 01/02).${C_RESET}"
+    fi
+    echo -e "${C_BLUE} ═══════════════════════════════════════════════════════════${C_RESET}"
+}
+
+# [04] Delete a deployed Cloud Run service.
+gcp_vless_delete_service() {
+    clear; show_banner
+    echo -e "  ${C_DANGER}   🗑️ DELETE A CLOUD RUN SERVICE${C_RESET}"
+    echo -e "${C_BLUE} ═══════════════════════════════════════════════════════════${C_RESET}"
+    if ! _gcp_vless_preflight; then return 1; fi
+    local region svc
+    read -r -p "$(echo -e ${C_PROMPT}"👉 Region [default: us-central1]: "${C_RESET})" region
+    region="${region:-us-central1}"
+    echo -e "  ${C_DIM}Existing services in ${region}:${C_RESET}"
+    gcloud run services list --platform managed --region "$region" --format='value(metadata.name)' 2>/dev/null | sed 's/^/    /'
+    read -r -p "$(echo -e ${C_PROMPT}"👉 Service name to delete: "${C_RESET})" svc
+    [[ -n "$svc" ]] || { echo -e "${C_YELLOW}Cancelled.${C_RESET}"; return 1; }
+    read -r -p "$(echo -e ${C_DANGER}"Type the service name again to confirm: "${C_RESET})" confirm
+    if [[ "$confirm" == "$svc" ]]; then
+        gcloud run services delete "$svc" --platform managed --region "$region" --quiet
+        echo -e "${C_GREEN}✅ Deleted ${svc}.${C_RESET}"
+    else
+        echo -e "${C_YELLOW}Names did not match. Nothing deleted.${C_RESET}"
+    fi
+}
+
+gcp_vless_menu() {
+    while true; do
+        show_banner
+        echo -e "  ${C_TITLE}       ☁️ GCP CLOUD RUN — VLESS DEPLOYER${C_RESET}"
+        echo -e "${C_BLUE} ═══════════════════════════════════════════════════════════${C_RESET}"
+        _mi "01" "🚀 DEPLOY TO MY OWN PROJECT" "(unlimited)"
+        _mi "02" "🧪 DEPLOY TO QWIKLABS LAB" "(5-hour)"
+        echo -e "${C_BLUE} ═══════════════════════════════════════════════════════════${C_RESET}"
+        _mi "03" "📋 SHOW LAST VLESS URI"
+        _mi "04" "🗑️ DELETE A DEPLOYED SERVICE"
+        echo -e "${C_BLUE} ═══════════════════════════════════════════════════════════${C_RESET}"
+        echo -e "  ${C_PURPLE}[${C_GREEN}0${C_PURPLE}]${C_RESET} ${C_WARN}⇦${C_RESET} ${C_DIM}${C_WARN}[ BACK ]${C_RESET}"
+        echo -e "${C_BLUE} ═══════════════════════════════════════════════════════════${C_RESET}"
+        if ! read -r -p "$(echo -e ${C_PROMPT}"👉 Select an option: "${C_RESET})" gc; then
+            echo; return
+        fi
+        case $gc in
+            01|1) deploy_gcp_vless_ownproject; press_enter ;;
+            02|2) deploy_gcp_vless_lab; press_enter ;;
+            03|3) gcp_vless_show_uri; press_enter ;;
+            04|4) gcp_vless_delete_service; press_enter ;;
+            0) return ;;
+            *) invalid_option ;;
+        esac
+    done
+}
+
 integrations_hub() {
     while true; do
         show_banner
@@ -8543,12 +9089,14 @@ integrations_hub() {
         _hub_item "1" "🤖 Telegram Bot"       "Manage the Telegram bot"
         _hub_item "2" "🔗 Rest API (9000)"    "Manage the REST API service"
         _hub_item "3" "🦆 DuckDNS"            "Free dynamic DNS for your server"
+        _hub_item "4" "☁️  GCP Cloud Run VLESS" "Deploy VLESS proxy to Google Cloud"
         _hub_footer
         read -r -p "$(echo -e ${C_PROMPT}"👉 Select an option: "${C_RESET})" choice || return
         case $choice in
             1) telegram_bot_menu; press_enter ;;
             2) rest_api_menu; press_enter ;;
             3) duckdns_menu ;;
+            4) gcp_vless_menu ;;
             0) return ;;
             *) invalid_option ;;
         esac
