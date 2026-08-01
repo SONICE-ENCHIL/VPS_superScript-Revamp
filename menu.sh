@@ -8816,19 +8816,15 @@ EOF
     GCP_VLESS_LAST_UUID="$uuid"
 }
 
-# Confirm gcloud + docker are present and the user is authenticated. Returns
+# Confirm gcloud is present and the user is authenticated. The container image
+# is built remotely by Cloud Build, so no local docker is required. Returns
 # non-zero (with a printed explanation) if the environment can't deploy.
 _gcp_vless_preflight() {
     if ! command -v gcloud &>/dev/null; then
         echo -e "${C_RED}❌ 'gcloud' CLI not found.${C_RESET}"
         echo -e "${C_DIM}   This deployer runs where the Google Cloud SDK is installed —${C_RESET}"
-        echo -e "${C_DIM}   e.g. Google Cloud Shell, or a machine with gcloud + docker.${C_RESET}"
+        echo -e "${C_DIM}   e.g. Google Cloud Shell, or any machine with gcloud (no docker needed).${C_RESET}"
         echo -e "${C_DIM}   Install: https://cloud.google.com/sdk/docs/install${C_RESET}"
-        return 1
-    fi
-    if ! command -v docker &>/dev/null; then
-        echo -e "${C_RED}❌ 'docker' not found.${C_RESET}"
-        echo -e "${C_DIM}   The container image is built locally with docker before push.${C_RESET}"
         return 1
     fi
     if ! gcloud auth list --filter=status:ACTIVE --format='value(account)' 2>/dev/null | grep -q .; then
@@ -8838,7 +8834,7 @@ _gcp_vless_preflight() {
     return 0
 }
 
-# Shared build → push → deploy engine.
+# Shared build (Cloud Build) → deploy engine.
 #   $1 project  $2 region  $3 service  $4 cpu  $5 memory
 _gcp_vless_deploy_engine() {
     local project="$1" region="$2" service="$3" cpu="$4" memory="$5"
@@ -8856,13 +8852,11 @@ _gcp_vless_deploy_engine() {
     ws_path=$(grep -o '"path": *"[^"]*"' "$build_dir/config.json" | cut -d'"' -f4 | head -n1)
     image="gcr.io/${project}/${service}:latest"
 
-    echo -e "${C_CYAN}[*]${C_RESET} Building image ${C_DIM}${image}${C_RESET} ..."
-    if ! ( cd "$build_dir" && docker build -t "$image" . ); then
-        echo -e "${C_RED}❌ Build failed.${C_RESET}"; rm -rf "$build_dir"; return 1
-    fi
-    echo -e "${C_CYAN}[*]${C_RESET} Pushing image to Container Registry..."
-    if ! docker push "$image"; then
-        echo -e "${C_RED}❌ Push failed. Run:${C_RESET} ${C_CYAN}gcloud auth configure-docker${C_RESET}"
+    echo -e "${C_CYAN}[*]${C_RESET} Building image ${C_DIM}${image}${C_RESET} remotely with Cloud Build..."
+    echo -e "${C_DIM}    (no local docker needed — Google builds the image for you)${C_RESET}"
+    if ! ( cd "$build_dir" && gcloud builds submit --tag "$image" --quiet . ); then
+        echo -e "${C_RED}❌ Cloud Build failed (see error above).${C_RESET}"
+        echo -e "${C_DIM}   Common causes: billing not enabled, or Cloud Build API blocked.${C_RESET}"
         rm -rf "$build_dir"; return 1
     fi
 
