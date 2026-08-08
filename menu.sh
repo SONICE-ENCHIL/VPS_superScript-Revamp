@@ -5060,9 +5060,11 @@ EOF
     systemctl start zivpn.service
 
     # Port Forwarding / Firewall
-    echo -e "${C_BLUE}🔥 Configuring Firewall Rules (Redirecting 6000-19999 -> 5667)...${C_RESET}"
+    echo -e "${C_BLUE}🔥 Configuring Firewall Rules (ZiVPN direct on UDP 5667)...${C_RESET}"
     # Ensure all DNAT rules (badvpn + zivpn) are applied together so the previous
     # badvpn rules aren't silently dropped when this rule is added independently.
+    # NOTE: defaults now expose ZiVPN directly on 5667 via a RETURN exception
+    # (no 6000-19999 range DNAT).
     _nat_load_rules
     _nat_apply
 
@@ -5071,8 +5073,7 @@ EOF
 
     if systemctl is-active --quiet zivpn.service; then
         echo -e "\n${C_GREEN}✅ ZiVPN Installed Successfully!${C_RESET}"
-        echo -e "   - UDP Port: 5667 (Direct)"
-        echo -e "   - UDP Ports: 6000-19999 (Forwarded)"
+        echo -e "   - UDP Port: 5667 (Direct — no 6000-19999 forwarding)"
     else
         echo -e "\n${C_RED}❌ ZiVPN Service failed to start. Check logs: journalctl -u zivpn.service${C_RESET}"
     fi
@@ -7977,11 +7978,15 @@ RETURN=tcp:49222
 RETURN=udp:53
 RETURN=udp:5300
 RETURN=udp:7300
+# ZiVPN listens directly on 5667. That port sits inside the udp:1:5999 DNAT
+# range below, so without this RETURN exception it would be hijacked into
+# udp-custom (36712). This lets clients reach ZiVPN straight on 5667 — no
+# 6000-19999 port-range hopping. (Point ZIVPN client configs at UDP 5667.)
+RETURN=udp:5667
 # DNAT rules  (format: proto:port_or_range:target_port)
 # NOTE: no blanket TCP DNAT — HTTP Custom (SSH/SSL over TCP) must reach its own
 # listeners untouched. Only UDP is forwarded to the relays, so TCP and UDP
 # (ZiVPN / udp-custom) coexist without conflict.
-DNAT=udp:6000:19999:5667
 DNAT=udp:1:5999:36712
 DNAT=udp:20000:65535:36712
 RULES
@@ -8102,7 +8107,7 @@ apply_default_nat_rules() {
     _nat_default_rules > "$NAT_RULES_CONF"
     _nat_load_rules
     _nat_apply
-    echo -e "${C_GREEN}✅ Default NAT rules applied (11 RETURN + 3 DNAT).${C_RESET}"
+    echo -e "${C_GREEN}✅ Default NAT rules applied (12 RETURN + 2 DNAT).${C_RESET}"
 }
 
 nat_forward_menu() {
@@ -8306,7 +8311,7 @@ nat_forward_menu() {
                 press_enter
                 ;;
             6)
-                echo -e "\n${C_YELLOW}⚠️ This will reset to the 11 RETURN + 3 DNAT defaults and wipe custom rules.${C_RESET}"
+                echo -e "\n${C_YELLOW}⚠️ This will reset to the 12 RETURN + 2 DNAT defaults and wipe custom rules.${C_RESET}"
                 read -p "👉 Type 'yes' to confirm: " confirm
                 if [[ "$confirm" != "yes" ]]; then
                     echo -e "\n${C_GREEN}Cancelled.${C_RESET}"; sleep 1; continue
