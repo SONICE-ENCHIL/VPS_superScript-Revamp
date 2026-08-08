@@ -1215,7 +1215,7 @@ ff_udp_session_blip() {
         conntrack -D -p udp --dport "$BADVPN_LISTEN_PORT" &>/dev/null
         if [[ "$do_zivpn" == "1" ]]; then
             conntrack -D -p udp --dport "$ZIVPN_LISTEN_PORT" &>/dev/null
-            conntrack -D -p udp --dport 6000:19999 &>/dev/null || true
+            conntrack -D -p udp --dport 61000:62000 &>/dev/null || true
         fi
     fi
     systemctl is-active --quiet udp-custom 2>/dev/null && systemctl try-restart udp-custom.service 2>/dev/null
@@ -2753,6 +2753,11 @@ _ff_udp_session_blip() {
         # too, matched by their pre-DNAT (original) destination port.
         if printf '%s\n' "${targets[@]}" | grep -qx zivpn; then
             conntrack -D -p udp --dport 61000:62000 &>/dev/null || true
+        fi
+        # udp-request also accepts the 20000-60999 range (DNAT -> 36713); clear
+        # those too, matched by their pre-DNAT (original) destination port.
+        if printf '%s\n' "${targets[@]}" | grep -qx udp-request; then
+            conntrack -D -p udp --dport 20000:60999 &>/dev/null || true
         fi
     fi
 
@@ -4930,7 +4935,7 @@ install_zivpn() {
 
     check_and_free_ports 5667 || return
     check_and_open_firewall_port 5667 udp || return
-    check_and_open_firewall_port_range "6000:19999" udp || return
+    check_and_open_firewall_port_range "61000:62000" udp || return
 
     echo -e "\n${C_GREEN}⚙️ Checking system architecture...${C_RESET}"
     local arch=$(uname -m)
@@ -5100,7 +5105,7 @@ uninstall_zivpn() {
     local iface
     iface=$(ip -4 route ls | grep default | grep -Po '(?<=dev )(\S+)' | head -1)
     if [ -n "$iface" ]; then
-        iptables -t nat -D PREROUTING -i "$iface" -p udp --dport 6000:19999 -j DNAT --to-destination :5667 2>/dev/null || true
+        iptables -t nat -D PREROUTING -i "$iface" -p udp --dport 61000:62000 -j DNAT --to-destination :5667 2>/dev/null || true
     fi
     
     echo -e "${C_BLUE}🗑️ Removing files...${C_RESET}"
@@ -7985,15 +7990,25 @@ RETURN=udp:7300
 # RETURN exception (5667 sits inside the udp:1:5999 range and would otherwise
 # be hijacked into udp-custom/36712). Point ZIVPN configs at UDP 61000-62000.
 RETURN=udp:5667
+# udp-custom (36712) and udp-request (36713) each own a DNAT range below, but
+# their OWN listen ports must stay directly reachable: 36712 and 36713 both sit
+# inside udp-request's 20000:60999 range and would otherwise be hijacked. These
+# RETURN exceptions (applied before any DNAT) keep each relay reachable on its
+# own port regardless of how the ranges are partitioned.
+RETURN=udp:36712
+RETURN=udp:36713
 # DNAT rules  (format: proto:port_or_range:target_port)
 # NOTE: no blanket TCP DNAT — HTTP Custom (SSH/SSL over TCP) must reach its own
 # listeners untouched. Only UDP is forwarded to the relays, so TCP and UDP
-# (ZiVPN / udp-custom) coexist without conflict.
-# The udp-custom range is split around ZiVPN's 61000:62000 carve-out so the
-# ranges never overlap (order-independent; no first-match shadowing).
+# (ZiVPN / udp-custom / udp-request) coexist without conflict.
+# Three-way UDP partition, no overlaps (order-independent; no first-match shadow):
+#   1:5999  + 62001:65535  -> udp-custom  (36712)
+#   20000:60999            -> udp-request (36713)
+#   61000:62000            -> ZiVPN       (5667)
+#   6000:19999             -> passthrough (e.g. SlowUDP 9400 stays untouched)
 # Do NOT put inline "#" comments on DNAT= lines — the value is parsed by ":".
 DNAT=udp:1:5999:36712
-DNAT=udp:20000:60999:36712
+DNAT=udp:20000:60999:36713
 DNAT=udp:61000:62000:5667
 DNAT=udp:62001:65535:36712
 RULES
@@ -8103,7 +8118,11 @@ _nat_show_rules() {
             local proto port_low port_high target label
             IFS=: read -r proto port_low port_high target <<< "$rule"
             label=""
-            [[ "$target" == "5667" ]] && label="  (ZiVPN)"
+            case "$target" in
+                5667)  label="  (ZiVPN)" ;;
+                36712) label="  (udp-custom)" ;;
+                36713) label="  (udp-request)" ;;
+            esac
             printf "  ${C_CHOICE}[D%2s]${C_RESET}  %-4s  %-17s  →  %-5s%s\n" "$((i+1))" "${proto^^}" "${port_low}:${port_high}" "$target" "$label"
         done
     fi
@@ -8114,7 +8133,7 @@ apply_default_nat_rules() {
     _nat_default_rules > "$NAT_RULES_CONF"
     _nat_load_rules
     _nat_apply
-    echo -e "${C_GREEN}✅ Default NAT rules applied (12 RETURN + 4 DNAT).${C_RESET}"
+    echo -e "${C_GREEN}✅ Default NAT rules applied (14 RETURN + 4 DNAT).${C_RESET}"
 }
 
 nat_forward_menu() {
@@ -8325,7 +8344,7 @@ nat_forward_menu() {
                 press_enter
                 ;;
             6)
-                echo -e "\n${C_YELLOW}⚠️ This will reset to the 12 RETURN + 4 DNAT defaults and wipe custom rules.${C_RESET}"
+                echo -e "\n${C_YELLOW}⚠️ This will reset to the 14 RETURN + 4 DNAT defaults and wipe custom rules.${C_RESET}"
                 read -p "👉 Type 'yes' to confirm: " confirm
                 if [[ "$confirm" != "yes" ]]; then
                     echo -e "\n${C_GREEN}Cancelled.${C_RESET}"; sleep 1; continue
