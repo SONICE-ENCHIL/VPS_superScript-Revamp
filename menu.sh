@@ -2749,9 +2749,10 @@ _ff_udp_session_blip() {
             esac
             [[ -n "$port" ]] && conntrack -D -p udp --dport "$port" &>/dev/null
         done
-        # ZiVPN also accepts the 6000-19999 range (DNAT -> 5667); clear those too.
+        # ZiVPN also accepts the 61000-62000 range (DNAT -> 5667); clear those
+        # too, matched by their pre-DNAT (original) destination port.
         if printf '%s\n' "${targets[@]}" | grep -qx zivpn; then
-            conntrack -D -p udp --dport 6000:19999 &>/dev/null || true
+            conntrack -D -p udp --dport 61000:62000 &>/dev/null || true
         fi
     fi
 
@@ -5060,11 +5061,11 @@ EOF
     systemctl start zivpn.service
 
     # Port Forwarding / Firewall
-    echo -e "${C_BLUE}🔥 Configuring Firewall Rules (ZiVPN direct on UDP 5667)...${C_RESET}"
+    echo -e "${C_BLUE}🔥 Configuring Firewall Rules (ZiVPN on UDP 5667, forwarded from 61000-62000)...${C_RESET}"
     # Ensure all DNAT rules (badvpn + zivpn) are applied together so the previous
     # badvpn rules aren't silently dropped when this rule is added independently.
-    # NOTE: defaults now expose ZiVPN directly on 5667 via a RETURN exception
-    # (no 6000-19999 range DNAT).
+    # NOTE: defaults forward the 61000-62000 UDP range to ZiVPN's 5667 listener
+    # (udp-custom range is split around it), plus a RETURN exception for direct 5667.
     _nat_load_rules
     _nat_apply
 
@@ -5073,7 +5074,8 @@ EOF
 
     if systemctl is-active --quiet zivpn.service; then
         echo -e "\n${C_GREEN}✅ ZiVPN Installed Successfully!${C_RESET}"
-        echo -e "   - UDP Port: 5667 (Direct — no 6000-19999 forwarding)"
+        echo -e "   - UDP Port: 5667 (Direct)"
+        echo -e "   - UDP Ports: 61000-62000 (Forwarded → 5667)"
     else
         echo -e "\n${C_RED}❌ ZiVPN Service failed to start. Check logs: journalctl -u zivpn.service${C_RESET}"
     fi
@@ -7978,17 +7980,22 @@ RETURN=tcp:49222
 RETURN=udp:53
 RETURN=udp:5300
 RETURN=udp:7300
-# ZiVPN listens directly on 5667. That port sits inside the udp:1:5999 DNAT
-# range below, so without this RETURN exception it would be hijacked into
-# udp-custom (36712). This lets clients reach ZiVPN straight on 5667 — no
-# 6000-19999 port-range hopping. (Point ZIVPN client configs at UDP 5667.)
+# ZiVPN listens on 5667. Clients reach it via the 61000:62000 UDP DNAT range
+# below (port hopping), and 5667 itself is also kept open directly via this
+# RETURN exception (5667 sits inside the udp:1:5999 range and would otherwise
+# be hijacked into udp-custom/36712). Point ZIVPN configs at UDP 61000-62000.
 RETURN=udp:5667
 # DNAT rules  (format: proto:port_or_range:target_port)
 # NOTE: no blanket TCP DNAT — HTTP Custom (SSH/SSL over TCP) must reach its own
 # listeners untouched. Only UDP is forwarded to the relays, so TCP and UDP
 # (ZiVPN / udp-custom) coexist without conflict.
+# The udp-custom range is split around ZiVPN's 61000:62000 carve-out so the
+# ranges never overlap (order-independent; no first-match shadowing).
+# Do NOT put inline "#" comments on DNAT= lines — the value is parsed by ":".
 DNAT=udp:1:5999:36712
-DNAT=udp:20000:65535:36712
+DNAT=udp:20000:60999:36712
+DNAT=udp:61000:62000:5667
+DNAT=udp:62001:65535:36712
 RULES
 }
 
@@ -8107,7 +8114,7 @@ apply_default_nat_rules() {
     _nat_default_rules > "$NAT_RULES_CONF"
     _nat_load_rules
     _nat_apply
-    echo -e "${C_GREEN}✅ Default NAT rules applied (12 RETURN + 2 DNAT).${C_RESET}"
+    echo -e "${C_GREEN}✅ Default NAT rules applied (12 RETURN + 4 DNAT).${C_RESET}"
 }
 
 nat_forward_menu() {
@@ -8204,9 +8211,16 @@ nat_forward_menu() {
                     *) proto="tcp" ;;
                 esac
                 read -p "👉 Port or range (e.g. 8080 or 8000:9000): " prange
-                [[ -z "$prange" ]] && echo -e "\n${C_RED}❌ Required.${C_RESET}"; sleep 1; continue
+                if [[ -z "$prange" ]]; then
+                    echo -e "\n${C_RED}❌ Required.${C_RESET}"; sleep 1; continue
+                fi
                 read -p "👉 Forward to port: " target
-                [[ -z "$target" || ! "$target" =~ ^[0-9]+$ ]] && echo -e "\n${C_RED}❌ Invalid port.${C_RESET}"; sleep 1; continue
+                if [[ -z "$target" || ! "$target" =~ ^[0-9]+$ ]]; then
+                    echo -e "\n${C_RED}❌ Invalid port.${C_RESET}"; sleep 1; continue
+                fi
+                # Normalize a single port (e.g. 8080) to low:high form so the
+                # 4-field apply parser (proto:low:high:target) always works.
+                [[ "$prange" != *:* ]] && prange="$prange:$prange"
                 if [[ "$proto" == "both" ]]; then
                     NAT_DNAT+=("tcp:$prange:$target")
                     NAT_DNAT+=("udp:$prange:$target")
@@ -8311,7 +8325,7 @@ nat_forward_menu() {
                 press_enter
                 ;;
             6)
-                echo -e "\n${C_YELLOW}⚠️ This will reset to the 12 RETURN + 2 DNAT defaults and wipe custom rules.${C_RESET}"
+                echo -e "\n${C_YELLOW}⚠️ This will reset to the 12 RETURN + 4 DNAT defaults and wipe custom rules.${C_RESET}"
                 read -p "👉 Type 'yes' to confirm: " confirm
                 if [[ "$confirm" != "yes" ]]; then
                     echo -e "\n${C_GREEN}Cancelled.${C_RESET}"; sleep 1; continue
