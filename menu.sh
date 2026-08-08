@@ -2083,22 +2083,12 @@ create_user() {
     echo -e "\n${C_DIM}Select the target application for this account:${C_RESET}"
     printf "  ${C_GREEN}[1]${C_RESET} %-16s ${C_DIM}(HTTP Custom / SSH Tunnel / HWID)${C_RESET}\n" "HTTP Custom"
     printf "  ${C_GREEN}[2]${C_RESET} %-16s ${C_DIM}(ZiVPN / UDP VPN / HWID)${C_RESET}\n" "ZiVPN"
-    printf "  ${C_GREEN}[3]${C_RESET} %-16s ${C_DIM}(OpenVPN)${C_RESET}\n" "OpenVPN"
-    printf "  ${C_GREEN}[4]${C_RESET} %-16s ${C_DIM}(WireGuard)${C_RESET}\n" "WireGuard"
-    printf "  ${C_GREEN}[5]${C_RESET} %-16s ${C_DIM}(Hysteria2)${C_RESET}\n" "Hysteria2"
-    printf "  ${C_GREEN}[6]${C_RESET} %-16s ${C_DIM}(ShadowSocks)${C_RESET}\n" "ShadowSocks"
-    printf "  ${C_GREEN}[7]${C_RESET} %-16s ${C_DIM}(SOCKS5 / PAM)${C_RESET}\n" "SOCKS5"
-    printf "  ${C_GREEN}[8]${C_RESET} %-16s ${C_DIM}(UDP Request / HWID)${C_RESET}\n" "UDP Request"
+    printf "  ${C_GREEN}[3]${C_RESET} %-16s ${C_DIM}(UDP Request / HWID)${C_RESET}\n" "UDP Request"
     read -p "👉 App type [1]: " app_choice
     app_choice=${app_choice:-1}
     case "$app_choice" in
         2|z|Z|zivpn|ZiVPN) app="zivpn" ;;
-        3|o|O|openvpn|OpenVPN) app="openvpn" ;;
-        4|w|W|wireguard|WireGuard) app="wireguard" ;;
-        5|h|H|hysteria|Hysteria2) app="hysteria2" ;;
-        6|s|S|shadowsocks|ShadowSocks) app="shadowsocks" ;;
-        7|socks5|SOCKS5) app="socks5" ;;
-        8|u|U|udp|UDP|udpreq|UDPReq) app="udp_request" ;;
+        3|u|U|udp|UDP|udpreq|UDPReq|udp_request) app="udp_request" ;;
         *) app="http" ;;
     esac
     echo -e "${C_GREEN}✅ App type set to: ${C_YELLOW}$app${C_RESET}\n"
@@ -7048,22 +7038,12 @@ create_trial_account() {
     echo -e "\n${C_DIM}Select target application:${C_RESET}"
     printf "  ${C_GREEN}[1]${C_RESET} %-16s ${C_DIM}(HTTP Custom)${C_RESET}\n" "HTTP Custom"
     printf "  ${C_GREEN}[2]${C_RESET} %-16s ${C_DIM}(ZiVPN)${C_RESET}\n" "ZiVPN"
-    printf "  ${C_GREEN}[3]${C_RESET} %-16s ${C_DIM}(OpenVPN)${C_RESET}\n" "OpenVPN"
-    printf "  ${C_GREEN}[4]${C_RESET} %-16s ${C_DIM}(WireGuard)${C_RESET}\n" "WireGuard"
-    printf "  ${C_GREEN}[5]${C_RESET} %-16s ${C_DIM}(Hysteria2 / HWID)${C_RESET}\n" "Hysteria2"
-    printf "  ${C_GREEN}[6]${C_RESET} %-16s ${C_DIM}(ShadowSocks / HWID)${C_RESET}\n" "ShadowSocks"
-    printf "  ${C_GREEN}[7]${C_RESET} %-16s ${C_DIM}(SOCKS5 / PAM)${C_RESET}\n" "SOCKS5"
-    printf "  ${C_GREEN}[8]${C_RESET} %-16s ${C_DIM}(UDP Request / HWID)${C_RESET}\n" "UDP Request"
+    printf "  ${C_GREEN}[3]${C_RESET} %-16s ${C_DIM}(UDP Request)${C_RESET}\n" "UDP Request"
     read -p "👉 App type [1]: " app_choice
     app_choice=${app_choice:-1}
     case "$app_choice" in
         2|z|Z|zivpn|ZiVPN)           app="zivpn" ;;
-        3|o|O|openvpn|OpenVPN)       app="openvpn" ;;
-        4|w|W|wireguard|WireGuard)   app="wireguard" ;;
-        5|h|H|hysteria|Hysteria2)    app="hysteria2" ;;
-        6|s|S|shadowsocks|ShadowSocks) app="shadowsocks" ;;
-        7|socks5|SOCKS5)             app="socks5" ;;
-        8|u|U|udp|UDP|udpreq|UDPReq) app="udp_request" ;;
+        3|u|U|udp|UDP|udpreq|UDPReq|udp_request) app="udp_request" ;;
         *)                           app="http" ;;
     esac
 
@@ -7271,22 +7251,12 @@ bulk_create_users() {
     echo -e "\n${C_DIM}Select target application for all users:${C_RESET}"
     printf "  ${C_GREEN}[1]${C_RESET} %-16s ${C_DIM}(HTTP Custom)${C_RESET}\n" "HTTP Custom"
     printf "  ${C_GREEN}[2]${C_RESET} %-16s ${C_DIM}(ZiVPN)${C_RESET}\n" "ZiVPN"
-    printf "  ${C_GREEN}[3]${C_RESET} %-16s ${C_DIM}(OpenVPN)${C_RESET}\n" "OpenVPN"
-    printf "  ${C_GREEN}[4]${C_RESET} %-16s ${C_DIM}(WireGuard)${C_RESET}\n" "WireGuard"
-    printf "  ${C_GREEN}[5]${C_RESET} %-16s ${C_DIM}(Hysteria2 / HWID)${C_RESET}\n" "Hysteria2"
-    printf "  ${C_GREEN}[6]${C_RESET} %-16s ${C_DIM}(ShadowSocks / HWID)${C_RESET}\n" "ShadowSocks"
-    printf "  ${C_GREEN}[7]${C_RESET} %-16s ${C_DIM}(SOCKS5 / PAM)${C_RESET}\n" "SOCKS5"
-    printf "  ${C_GREEN}[8]${C_RESET} %-16s ${C_DIM}(UDP Request / HWID)${C_RESET}\n" "UDP Request"
+    printf "  ${C_GREEN}[3]${C_RESET} %-16s ${C_DIM}(UDP Request)${C_RESET}\n" "UDP Request"
     read -p "👉 App type [1]: " app_choice
     app_choice=${app_choice:-1}
     case "$app_choice" in
         2|z|Z|zivpn|ZiVPN)           app="zivpn" ;;
-        3|o|O|openvpn|OpenVPN)       app="openvpn" ;;
-        4|w|W|wireguard|WireGuard)   app="wireguard" ;;
-        5|h|H|hysteria|Hysteria2)    app="hysteria2" ;;
-        6|s|S|shadowsocks|ShadowSocks) app="shadowsocks" ;;
-        7|socks5|SOCKS5)             app="socks5" ;;
-        8|u|U|udp|UDP|udpreq|UDPReq) app="udp_request" ;;
+        3|u|U|udp|UDP|udpreq|UDPReq|udp_request) app="udp_request" ;;
         *)                           app="http" ;;
     esac
 
