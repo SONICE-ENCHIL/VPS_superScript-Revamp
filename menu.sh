@@ -2081,12 +2081,12 @@ create_user() {
     # App type selector
     local app="http"
     echo -e "\n${C_DIM}Select the target application for this account:${C_RESET}"
-    printf "  ${C_GREEN}[1]${C_RESET} %-16s ${C_DIM}(HTTP Custom / SSH Tunnel)${C_RESET}\n" "HTTP Custom"
-    printf "  ${C_GREEN}[2]${C_RESET} %-16s ${C_DIM}(ZiVPN / UDP VPN)${C_RESET}\n" "ZiVPN"
+    printf "  ${C_GREEN}[1]${C_RESET} %-16s ${C_DIM}(HTTP Custom / SSH Tunnel / HWID)${C_RESET}\n" "HTTP Custom"
+    printf "  ${C_GREEN}[2]${C_RESET} %-16s ${C_DIM}(ZiVPN / UDP VPN / HWID)${C_RESET}\n" "ZiVPN"
     printf "  ${C_GREEN}[3]${C_RESET} %-16s ${C_DIM}(OpenVPN)${C_RESET}\n" "OpenVPN"
     printf "  ${C_GREEN}[4]${C_RESET} %-16s ${C_DIM}(WireGuard)${C_RESET}\n" "WireGuard"
-    printf "  ${C_GREEN}[5]${C_RESET} %-16s ${C_DIM}(Hysteria2 / HWID)${C_RESET}\n" "Hysteria2"
-    printf "  ${C_GREEN}[6]${C_RESET} %-16s ${C_DIM}(ShadowSocks / HWID)${C_RESET}\n" "ShadowSocks"
+    printf "  ${C_GREEN}[5]${C_RESET} %-16s ${C_DIM}(Hysteria2)${C_RESET}\n" "Hysteria2"
+    printf "  ${C_GREEN}[6]${C_RESET} %-16s ${C_DIM}(ShadowSocks)${C_RESET}\n" "ShadowSocks"
     printf "  ${C_GREEN}[7]${C_RESET} %-16s ${C_DIM}(SOCKS5 / PAM)${C_RESET}\n" "SOCKS5"
     printf "  ${C_GREEN}[8]${C_RESET} %-16s ${C_DIM}(UDP Request / HWID)${C_RESET}\n" "UDP Request"
     read -p "👉 App type [1]: " app_choice
@@ -2105,17 +2105,27 @@ create_user() {
 
     # Optional HWID device lock. Blank = no restriction (credentials usable on any
     # device). When set, the user can optionally be strict-enforced by the daemon.
+    # Only offered for apps whose service logs can actually report a device token
+    # (HTTP Custom / udp-custom, ZiVPN, UDP Request); HWID can't be enforced for the
+    # other app types, so the prompt is skipped for them.
     local hwid="" strict="0"
-    echo -e "${C_DIM}Leave blank for no device lock (works on multiple devices).${C_RESET}"
-    echo -e "${C_DIM}For several devices, separate HWIDs with commas (e.g. hwidA,hwidB).${C_RESET}"
-    read -p "🔒 Enter HWID(s) from VPN app (optional): " hwid
-    hwid=$(_ff_normalize_hwids "$hwid")
-    if [[ -n "$hwid" ]]; then
-        local s_choice="y"
-        read -p "🛡️ Strict-enforce these device(s)? (y/n) [y]: " s_choice
-        s_choice=${s_choice:-y}
-        [[ "$s_choice" == "y" || "$s_choice" == "Y" ]] && strict=1
-    fi
+    case "$app" in
+        http|zivpn|udp_request)
+            echo -e "${C_DIM}Leave blank for no device lock (works on multiple devices).${C_RESET}"
+            echo -e "${C_DIM}For several devices, separate HWIDs with commas (e.g. hwidA,hwidB).${C_RESET}"
+            read -p "🔒 Enter HWID(s) from VPN app (optional): " hwid
+            hwid=$(_ff_normalize_hwids "$hwid")
+            if [[ -n "$hwid" ]]; then
+                local s_choice="y"
+                read -p "🛡️ Strict-enforce these device(s)? (y/n) [y]: " s_choice
+                s_choice=${s_choice:-y}
+                [[ "$s_choice" == "y" || "$s_choice" == "Y" ]] && strict=1
+            fi
+            ;;
+        *)
+            echo -e "${C_DIM}ℹ️ HWID device lock isn't applicable for this app — skipping.${C_RESET}"
+            ;;
+    esac
     # NOTE: per-user UDP port ranges are intentionally not assigned. The NAT layer
     # forwards the whole UDP range to the relays globally, so every account works
     # without carving out per-user ranges.
