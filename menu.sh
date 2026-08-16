@@ -2810,6 +2810,9 @@ _ff_zivpn_unlock_user() {
 _ff_restore_user_all_protocols() {
     local u="$1"
     usermod -U "$u" &>/dev/null
+    # usermod -U only strips the first '!'; force-clear a stubborn double lock
+    # so renew/restore reliably reopens an account locked by two subsystems.
+    _ff_is_shadow_locked "$u" && _ff_force_shadow_unlock "$u"
     _ff_unblock_user_traffic "$u"
     if [[ "$(_ff_zivpn_unlock_user "$u")" == "changed" ]]; then
         systemctl is-active --quiet zivpn 2>/dev/null && systemctl try-restart zivpn.service 2>/dev/null
@@ -2817,6 +2820,32 @@ _ff_restore_user_all_protocols() {
     systemctl is-active --quiet udp-custom 2>/dev/null && systemctl try-restart udp-custom.service 2>/dev/null
     systemctl is-active --quiet hysteria-server 2>/dev/null && systemctl try-restart hysteria-server 2>/dev/null
     systemctl is-active --quiet shadowsocks-libev 2>/dev/null && systemctl try-restart shadowsocks-libev 2>/dev/null
+}
+
+# True (0) when the account's /etc/shadow password field is locked (leading '!').
+# Mirrors how the user list and the limiter daemon detect a system lock, so the
+# unlock path agrees with what the admin actually sees in the list.
+_ff_is_shadow_locked() {
+    local u="$1" f2
+    f2=$(awk -F: -v user="$u" '$1==user{print $2; exit}' /etc/shadow 2>/dev/null)
+    [[ "${f2:0:1}" == "!" ]]
+}
+
+# Force-clear ANY system (shadow) lock on a managed account. 'usermod -U' only
+# strips the FIRST '!', so an account locked by two subsystems (the limiter and
+# the UDP anti-sharing guard, or a manual lock stacked on an auto-lock) keeps a
+# '!!' prefix and stays locked after a normal unlock. This rewrites the password
+# field to the stored hash with every leading '!' removed. Returns 1 (changing
+# nothing) when there is no real password to restore — the caller then tells the
+# admin to reset it. Only ever touches accounts present in users.db.
+_ff_force_shadow_unlock() {
+    local u="$1" cur stripped
+    grep -q "^${u}:" "$DB_FILE" 2>/dev/null || return 1
+    cur=$(awk -F: -v user="$u" '$1==user{print $2; exit}' /etc/shadow 2>/dev/null)
+    stripped="$cur"
+    while [[ "$stripped" == '!'* ]]; do stripped="${stripped#!}"; done
+    [[ -z "$stripped" || "$stripped" == '*' ]] && return 1
+    usermod -p "$stripped" "$u" 2>/dev/null
 }
 
 lock_user() {
@@ -2872,21 +2901,69 @@ unlock_user() {
 
     echo -e "\n${C_BLUE}🔓 Unlocking selected users...${C_RESET}"
     local zivpn_changed=false
+    local share_locks="$DB_DIR/udp_share.locks"
+    local now_ts; printf -v now_ts '%(%s)T' -1
     for u in "${SELECTED_USERS[@]}"; do
         if ! id "$u" &>/dev/null; then
              echo -e " ❌ User '${C_YELLOW}$u${C_RESET}' does not exist on this system."
              continue
         fi
 
-        usermod -U "$u"
-        if [ $? -eq 0 ]; then
-            _ff_unblock_user_traffic "$u"
-            # ZiVPN: restore the password we removed at lock time, if any.
-            [[ "$(_ff_zivpn_unlock_user "$u")" == "changed" ]] && zivpn_changed=true
-            echo -e " ✅ ${C_YELLOW}$u${C_RESET} unlocked — can reconnect immediately (all protocols)."
-        else
-            echo -e " ❌ Failed to unlock ${C_YELLOW}$u${C_RESET}."
+        # Authoritatively clear the system (shadow) lock. usermod -U handles the
+        # common single-'!' case cleanly (preserving password aging); if the
+        # account is still locked afterwards (double '!!' from two lockers, or a
+        # stale field) force-clear it directly.
+        usermod -U "$u" &>/dev/null
+        if _ff_is_shadow_locked "$u"; then
+            _ff_force_shadow_unlock "$u"
         fi
+        if _ff_is_shadow_locked "$u"; then
+            echo -e " ⚠️  ${C_YELLOW}$u${C_RESET} is still locked at the system level — the account has no valid password to restore. Use 📝 Edit User to set a new password."
+            continue
+        fi
+
+        # Drop the anti-sharing auto-lock ledger entry, or the UDP share-guard
+        # daemon still counts this account as under its temporary lock and can
+        # re-apply usermod -L on its next scan.
+        if [[ -f "$share_locks" ]] && grep -q "^${u} " "$share_locks" 2>/dev/null; then
+            grep -v "^${u} " "$share_locks" > "${share_locks}.tmp" 2>/dev/null && mv "${share_locks}.tmp" "$share_locks" 2>/dev/null
+        fi
+
+        # Clear the limiter's re-lock CAUSES so the unlock actually holds.
+        local dbline exp bw
+        dbline=$(grep "^${u}:" "$DB_FILE" 2>/dev/null)
+        IFS=: read -r _ _ exp _ bw _ <<< "$dbline"
+        # (a) Bandwidth quota: reset usage to 0 when at/over the cap so the
+        #     limiter daemon does not immediately re-lock (admin-chosen policy).
+        local quota_note=""
+        if [[ -n "$bw" && "$bw" != "0" ]]; then
+            local usagefile="$BANDWIDTH_DIR/${u}.usage" used=0 quota
+            if [[ -f "$usagefile" ]]; then read -r used < "$usagefile" 2>/dev/null; [[ "$used" =~ ^[0-9]+$ ]] || used=0; fi
+            quota=$(( ${bw%%.*} * 1073741824 ))
+            if [[ "$quota" =~ ^[0-9]+$ ]] && (( quota > 0 && used >= quota )); then
+                echo "0" > "$usagefile"
+                rm -f "$BANDWIDTH_DIR/pidtrack/${u}__"*.last 2>/dev/null
+                quota_note="    ${C_DIM}↳ bandwidth usage was over the ${bw}GB quota — reset to 0 so the unlock holds.${C_RESET}"
+            fi
+        fi
+        # (b) Expiry: a shadow unlock cannot survive a past expiry date — the
+        #     limiter re-locks expired accounts within one scan. Point the admin
+        #     at Renew instead of silently letting the unlock bounce back.
+        local exp_note=""
+        if [[ -n "$exp" && "$exp" != "Never" && "$exp" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+            local exp_ts; exp_ts=$(date -d "$exp" +%s 2>/dev/null || echo 0)
+            if [[ "$exp_ts" =~ ^[0-9]+$ ]] && (( exp_ts > 0 && exp_ts < now_ts )); then
+                exp_note="    ${C_YELLOW}⚠️  $u is EXPIRED ($exp) — this unlock will not hold; use 🔄 Renew to extend the account.${C_RESET}"
+            fi
+        fi
+
+        # Restore traffic + protocol auth (SSH/UDP/ZiVPN).
+        _ff_unblock_user_traffic "$u"
+        # ZiVPN: restore the password we removed at lock time, if any.
+        [[ "$(_ff_zivpn_unlock_user "$u")" == "changed" ]] && zivpn_changed=true
+        echo -e " ✅ ${C_YELLOW}$u${C_RESET} unlocked — can reconnect immediately (all protocols)."
+        [[ -n "$quota_note" ]] && echo -e "$quota_note"
+        [[ -n "$exp_note" ]] && echo -e "$exp_note"
     done
 
     # Reload ZiVPN so restored passwords take effect.
