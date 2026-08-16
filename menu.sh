@@ -1997,16 +1997,23 @@ _select_multi_user_interface() {
         done
         
         if [[ "$valid" == true && ( ${#selected_indices[@]} -gt 0 || ${#selected_names[@]} -gt 0 ) ]]; then
-            mapfile -t unique_indices < <(printf "%s\n" "${selected_indices[@]}" | sort -u -n)
-            for idx in "${unique_indices[@]}"; do
-                SELECTED_USERS+=("${users[$((idx-1))]}")
-            done
-            mapfile -t unique_names < <(printf "%s\n" "${selected_names[@]}" | sort -u)
-            for username in "${unique_names[@]}"; do
-                if ! printf "%s\n" "${SELECTED_USERS[@]}" | grep -Fxq "$username"; then
-                    SELECTED_USERS+=("$username")
-                fi
-            done
+            # printf "%s\n" over an EMPTY array still prints one blank line, which
+            # mapfile then captures as a spurious "" element — surfacing later as
+            # "User '' does not exist". Only expand each list when it has entries.
+            if [[ ${#selected_indices[@]} -gt 0 ]]; then
+                mapfile -t unique_indices < <(printf "%s\n" "${selected_indices[@]}" | sort -u -n)
+                for idx in "${unique_indices[@]}"; do
+                    SELECTED_USERS+=("${users[$((idx-1))]}")
+                done
+            fi
+            if [[ ${#selected_names[@]} -gt 0 ]]; then
+                mapfile -t unique_names < <(printf "%s\n" "${selected_names[@]}" | sort -u)
+                for username in "${unique_names[@]}"; do
+                    if ! printf "%s\n" "${SELECTED_USERS[@]}" | grep -Fxq "$username"; then
+                        SELECTED_USERS+=("$username")
+                    fi
+                done
+            fi
             return
         else
             echo -e "${C_RED}❌ Invalid selection. Please check your numbers or usernames.${C_RESET}"
@@ -2118,7 +2125,15 @@ create_user() {
         useradd -m -s /usr/sbin/nologin "$username"
     fi
     usermod -aG "$FF_USERS_GROUP" "$username" 2>/dev/null
-    echo "$username:$password" | chpasswd; chage -E "$expire_date" "$username"
+    if ! _ff_set_password "$username" "$password"; then
+        echo -e "\n${C_RED}❌ Could not set a valid password for '$username' on this host.${C_RESET}"
+        echo -e "${C_DIM}   chpasswd and every fallback failed, so the account would be created${C_RESET}"
+        echo -e "${C_DIM}   locked with no password to restore. Aborting to avoid a broken user.${C_RESET}"
+        [[ "$adopt_existing" != "true" ]] && userdel -r "$username" &>/dev/null
+        read -p "Press [Enter] to continue..."
+        return
+    fi
+    chage -E "$expire_date" "$username"
     # Fields: user:pass:expiry:limit:bw:marker:hwid:strict
     # 6th field is the account marker: empty = normal account, "trial" = auto-expiring trial.
     echo "$username:$password:$expire_date:$limit:$bandwidth_gb::$hwid:$strict:$app" >> "$DB_FILE"
@@ -2426,14 +2441,20 @@ edit_user() {
                    new_pass=$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 8)
                    echo -e "${C_GREEN}🔑 Auto-generated: ${C_YELLOW}$new_pass${C_RESET}"
                fi
-                echo "$username:$new_pass" | chpasswd
-                db_set_user "$username" "$new_pass" "$cur_expiry" "$cur_limit" "$cur_bw" "$cur_marker" "$cur_hwid" "$cur_strict" "$cur_app"
-                 # Password is part of the enforcer's identity match for ZiVPN, so resync.
-                hwid_sync_allowed_db
-                if [[ "$cur_app" == "zivpn" ]] && _ff_zivpn_add_pass "$new_pass"; then
-                    systemctl is-active --quiet zivpn 2>/dev/null && systemctl try-restart zivpn.service 2>/dev/null
+                if ! _ff_set_password "$username" "$new_pass"; then
+                    echo -e "\n${C_RED}❌ Failed to set the password on this host (chpasswd + fallbacks all failed).${C_RESET}"
+                    echo -e "${C_DIM}   The account was left unchanged.${C_RESET}"
+                else
+                    db_set_user "$username" "$new_pass" "$cur_expiry" "$cur_limit" "$cur_bw" "$cur_marker" "$cur_hwid" "$cur_strict" "$cur_app"
+                    # Password is part of the enforcer's identity match for ZiVPN, so resync.
+                    hwid_sync_allowed_db
+                    if [[ "$cur_app" == "zivpn" ]] && _ff_zivpn_add_pass "$new_pass"; then
+                        systemctl is-active --quiet zivpn 2>/dev/null && systemctl try-restart zivpn.service 2>/dev/null
+                    fi
+                    # Writing a fresh hash also clears any '!' lock, so changing the
+                    # password doubles as recovery for an account stuck locked with none.
+                    echo -e "\n${C_GREEN}✅ Password for '$username' changed to: ${C_YELLOW}$new_pass${C_RESET}"
                 fi
-                echo -e "\n${C_GREEN}✅ Password for '$username' changed to: ${C_YELLOW}$new_pass${C_RESET}"
                ;;
             2) read -p "Enter new duration (in days from today): " days
                if [[ "$days" =~ ^[0-9]+$ ]]; then
@@ -2848,6 +2869,50 @@ _ff_force_shadow_unlock() {
     usermod -p "$stripped" "$u" 2>/dev/null
 }
 
+# Read a user's /etc/shadow password field (field 2). Empty if the user is absent.
+_ff_shadow_field2() {
+    awk -F: -v user="$1" '$1==user{print $2; exit}' /etc/shadow 2>/dev/null
+}
+
+# Set a managed account's system password and VERIFY it actually landed as a
+# real crypt hash. A bare 'echo user:pass | chpasswd' is fire-and-forget: on
+# some hosts it silently no-ops — a PAM password-quality gate rejecting a weak
+# password (e.g. one equal to the username), or a custom chpasswd config — and
+# leaves the account at useradd's default '!'. That is an account created
+# "locked" with no hash behind it, which can never be unlocked because there is
+# nothing to restore (exactly the "users stuck locked" report). Here we set the
+# password, then confirm field-2 is a genuine hash (starts with '$'). If the
+# normal path didn't take, we generate the SHA-512 hash ourselves and write it
+# straight to the shadow field with 'usermod -p', which bypasses any quality
+# gate. Writing a fresh hash also clears any leading '!', so calling this on a
+# locked account both sets the password AND unlocks it. Returns 0 only once a
+# real hash is present, 1 if every method failed.
+_ff_set_password() {
+    local u="$1" p="$2" f2 hash
+
+    echo "$u:$p" | chpasswd 2>/dev/null
+    f2=$(_ff_shadow_field2 "$u"); [[ "$f2" == '$'* ]] && return 0
+
+    # Retry forcing SHA-512 explicitly, in case the host's default method balked.
+    echo "$u:$p" | chpasswd -c SHA512 2>/dev/null
+    f2=$(_ff_shadow_field2 "$u"); [[ "$f2" == '$'* ]] && return 0
+
+    # Last resort: hash it ourselves and write it directly, bypassing chpasswd
+    # (and therefore any PAM/quality gate that was refusing the password).
+    hash=""
+    if command -v openssl >/dev/null 2>&1; then
+        hash=$(openssl passwd -6 -stdin <<<"$p" 2>/dev/null)
+    fi
+    if [[ "$hash" != '$'* ]] && command -v python3 >/dev/null 2>&1; then
+        hash=$(python3 -c 'import crypt,sys; print(crypt.crypt(sys.argv[1], crypt.mksalt(crypt.METHOD_SHA512)))' "$p" 2>/dev/null)
+    fi
+    if [[ "$hash" == '$'* ]]; then
+        usermod -p "$hash" "$u" 2>/dev/null
+        f2=$(_ff_shadow_field2 "$u"); [[ "$f2" == '$'* ]] && return 0
+    fi
+    return 1
+}
+
 lock_user() {
     _select_multi_user_interface "--- 🔒 Lock Users (from DB) ---"
     if [[ ${#SELECTED_USERS[@]} -eq 0 || "${SELECTED_USERS[0]}" == "NO_USERS" ]]; then return; fi
@@ -2916,6 +2981,18 @@ unlock_user() {
         usermod -U "$u" &>/dev/null
         if _ff_is_shadow_locked "$u"; then
             _ff_force_shadow_unlock "$u"
+        fi
+        if _ff_is_shadow_locked "$u"; then
+            # Nothing to restore — the account was created without a usable hash
+            # (a chpasswd that silently failed), so usermod -U/-p have nothing to
+            # unlock. Re-establish the password from the copy stored in users.db
+            # so a plain Unlock repairs these "locked from birth" accounts instead
+            # of dead-ending at Edit User.
+            local db_pass
+            db_pass=$(awk -F: -v user="$u" '$1==user{print $2; exit}' "$DB_FILE" 2>/dev/null)
+            if [[ -n "$db_pass" ]] && _ff_set_password "$u" "$db_pass"; then
+                echo -e "    ${C_DIM}↳ system password was missing — restored it from the database.${C_RESET}"
+            fi
         fi
         if _ff_is_shadow_locked "$u"; then
             echo -e " ⚠️  ${C_YELLOW}$u${C_RESET} is still locked at the system level — the account has no valid password to restore. Use 📝 Edit User to set a new password."
@@ -3291,7 +3368,9 @@ restore_user_data() {
         fi
         usermod -aG "$FF_USERS_GROUP" "$user" 2>/dev/null
         echo " - Setting password..."
-        echo "$user:$pass" | chpasswd
+        if ! _ff_set_password "$user" "$pass"; then
+            echo -e "${C_RED}   ⚠️ Could not set password for '$user' — set it later via Edit User.${C_RESET}"
+        fi
         echo " - Setting expiration to $expiry..."
         chage -E "$expiry" "$user"
         [[ -z "$bandwidth_gb" ]] && bandwidth_gb="0"
@@ -7092,7 +7171,12 @@ create_trial_account() {
     ensure_VPS_superScript_system_group
     useradd -m -s /usr/sbin/nologin "$username"
     usermod -aG "$FF_USERS_GROUP" "$username" 2>/dev/null
-    echo "$username:$password" | chpasswd
+    if ! _ff_set_password "$username" "$password"; then
+        echo -e "\n${C_RED}❌ Could not set a password for trial user '$username'; aborting.${C_RESET}"
+        userdel -r "$username" &>/dev/null
+        read -p "Press [Enter] to continue..."
+        return
+    fi
     chage -E "$expire_date" "$username"
     echo "$username:$password:$expire_date:$limit:$bandwidth_gb:trial::0:$app" >> "$DB_FILE"
 
@@ -7305,7 +7389,11 @@ bulk_create_users() {
         local password=$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 8)
         useradd -m -s /usr/sbin/nologin "$username"
         usermod -aG "$FF_USERS_GROUP" "$username" 2>/dev/null
-        echo "$username:$password" | chpasswd
+        if ! _ff_set_password "$username" "$password"; then
+            echo -e "${C_RED}  ⚠️ Skipping '$username' — could not set a password on this host.${C_RESET}"
+            userdel -r "$username" &>/dev/null
+            continue
+        fi
         chage -E "$expire_date" "$username"
         echo "$username:$password:$expire_date:$limit:$bandwidth_gb:::0:$app" >> "$DB_FILE"
         if [[ "$app" == "zivpn" ]]; then
@@ -10078,6 +10166,35 @@ class H(http.server.BaseHTTPRequestHandler):
     def _run(self, *a):
         try: return subprocess.check_output(a, stderr=subprocess.STDOUT, timeout=30).decode()
         except: return ""
+    def _setpw(self, u, pw):
+        # Set the account password and VERIFY it landed as a real hash. A bare
+        # chpasswd can silently no-op (PAM password-quality gate rejecting a weak
+        # password, custom host config), leaving the account locked with nothing
+        # to restore. If it doesn't take, hash it ourselves and write it directly.
+        # Mirrors the menu's _ff_set_password. Returns True only once a hash is set.
+        def f2():
+            try:
+                with open("/etc/shadow") as sh:
+                    for ln in sh:
+                        pr = ln.split(":")
+                        if pr and pr[0] == u:
+                            return pr[1] if len(pr) > 1 else ""
+            except: pass
+            return ""
+        try:
+            pipe = subprocess.Popen(["chpasswd"], stdin=subprocess.PIPE)
+            pipe.communicate((u + ":" + pw + "\n").encode(), timeout=30)
+        except: pass
+        if f2().startswith("$"): return True
+        try:
+            import crypt
+            h = crypt.crypt(pw, crypt.mksalt(crypt.METHOD_SHA512))
+        except Exception:
+            h = ""
+        if h.startswith("$"):
+            self._run("usermod", "-p", h, u)
+            if f2().startswith("$"): return True
+        return False
     def do_GET(self):
         p, q = self._p()
         if not p or p[0] == "":
@@ -10114,7 +10231,9 @@ class H(http.server.BaseHTTPRequestHandler):
             ex = subprocess.check_output(["date","-d",f"+{dy} days","+%Y-%m-%d"], timeout=5).decode().strip()
             self._run("useradd","-m","-s","/usr/sbin/nologin",u)
             self._run("usermod","-aG","ffusers",u)
-            self._run("bash","-c",f'echo "{u}:{pw}" | chpasswd')
+            if not self._setpw(u, pw):
+                self._run("userdel","-r",u)
+                return self._e("could not set password on this host; user not created", 500)
             self._run("chage","-E",ex,u)
             with open(DB_FILE,"a") as f: f.write(f"{u}:{pw}:{ex}:{lm}:{bw}::::0:{ap}\n")
             al = self._run("bash","-c",f"cd {os.path.dirname(DB_FILE)} && hwid_sync_allowed_db")
