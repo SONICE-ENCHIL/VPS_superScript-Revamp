@@ -7585,14 +7585,7 @@ generate_client_config() {
             echo -e "   • DNS IP: 1.1.1.1 / 8.8.8.8"
         fi
     fi
-    
-    # 5. ZiVPN
-    if systemctl is-active --quiet zivpn; then
-        echo -e "\n🔹 ${C_BOLD}ZiVPN${C_RESET}:"
-        echo -e "   • UDP Port: 5667"
-        echo -e "   • Forwarded Ports: 6000-19999"
-    fi
-    
+
     echo -e "${C_YELLOW}========================================${C_RESET}"
 
 }
