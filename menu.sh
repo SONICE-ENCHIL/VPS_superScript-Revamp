@@ -1207,7 +1207,7 @@ ff_udp_session_blip() {
         conntrack -D -p udp --dport "$BADVPN_LISTEN_PORT" &>/dev/null
         if [[ "$do_zivpn" == "1" ]]; then
             conntrack -D -p udp --dport "$ZIVPN_LISTEN_PORT" &>/dev/null
-            conntrack -D -p udp --dport 61000:62000 &>/dev/null || true
+            conntrack -D -p udp --dport 6000:19999 &>/dev/null || true
         fi
     fi
     systemctl is-active --quiet udp-custom 2>/dev/null && systemctl try-restart udp-custom.service 2>/dev/null
@@ -1662,6 +1662,18 @@ sync_runtime_components_if_needed() {
        || iptables -t nat -C PREROUTING -p tcp --dport 1:65535 -j DNAT --to-destination :36712 2>/dev/null; then
         echo -e "${C_BLUE}🔧 Migrating NAT rules: removing legacy blanket TCP DNAT (HTTP Custom / ZiVPN conflict)...${C_RESET}"
         sed -i '/^DNAT=tcp:1:65535:36712$/d' "$NAT_RULES_CONF" 2>/dev/null
+        _nat_load_rules
+        _nat_apply
+    fi
+
+    # Self-heal NAT on installs that forwarded only the narrow 61000:62000 UDP
+    # window to ZiVPN. Widen it to the standard 6000:19999 band (the file rewrite
+    # happens in _nat_load_rules) and re-apply live so port-hopping ZiVPN clients
+    # reach 5667 without a manual NAT reset. Only acts when the old rule is still
+    # present in the saved file or the live table. Idempotent.
+    if grep -q '^DNAT=udp:61000:62000:5667$' "$NAT_RULES_CONF" 2>/dev/null \
+       || iptables -t nat -C PREROUTING -p udp --dport 61000:62000 -j DNAT --to-destination :5667 2>/dev/null; then
+        echo -e "${C_BLUE}🔧 Migrating NAT rules: widening ZiVPN UDP range to 6000-19999...${C_RESET}"
         _nat_load_rules
         _nat_apply
     fi
@@ -2754,10 +2766,10 @@ _ff_udp_session_blip() {
             esac
             [[ -n "$port" ]] && conntrack -D -p udp --dport "$port" &>/dev/null
         done
-        # ZiVPN also accepts the 61000-62000 range (DNAT -> 5667); clear those
+        # ZiVPN also accepts the 6000-19999 range (DNAT -> 5667); clear those
         # too, matched by their pre-DNAT (original) destination port.
         if printf '%s\n' "${targets[@]}" | grep -qx zivpn; then
-            conntrack -D -p udp --dport 61000:62000 &>/dev/null || true
+            conntrack -D -p udp --dport 6000:19999 &>/dev/null || true
         fi
     fi
 
@@ -5064,7 +5076,7 @@ install_zivpn() {
 
     check_and_free_ports 5667 || return
     check_and_open_firewall_port 5667 udp || return
-    check_and_open_firewall_port_range "61000:62000" udp || return
+    check_and_open_firewall_port_range "6000:19999" udp || return
 
     echo -e "\n${C_GREEN}⚙️ Checking system architecture...${C_RESET}"
     local arch=$(uname -m)
@@ -5195,11 +5207,11 @@ EOF
     systemctl start zivpn.service
 
     # Port Forwarding / Firewall
-    echo -e "${C_BLUE}🔥 Configuring Firewall Rules (ZiVPN on UDP 5667, forwarded from 61000-62000)...${C_RESET}"
+    echo -e "${C_BLUE}🔥 Configuring Firewall Rules (ZiVPN on UDP 5667, forwarded from 6000-19999)...${C_RESET}"
     # Ensure all DNAT rules (badvpn + zivpn) are applied together so the previous
     # badvpn rules aren't silently dropped when this rule is added independently.
-    # NOTE: defaults forward the 61000-62000 UDP range to ZiVPN's 5667 listener
-    # (udp-custom range is split around it), plus a RETURN exception for direct 5667.
+    # NOTE: defaults forward the 6000-19999 UDP range to ZiVPN's 5667 listener
+    # (udp-custom takes 1:5999 + 20000:65535), plus a RETURN exception for direct 5667.
     _nat_load_rules
     _nat_apply
 
@@ -5209,7 +5221,7 @@ EOF
     if systemctl is-active --quiet zivpn.service; then
         echo -e "\n${C_GREEN}✅ ZiVPN Installed Successfully!${C_RESET}"
         echo -e "   - UDP Port: 5667 (Direct)"
-        echo -e "   - UDP Ports: 61000-62000 (Forwarded → 5667)"
+        echo -e "   - UDP Ports: 6000-19999 (Forwarded → 5667)"
     else
         echo -e "\n${C_RED}❌ ZiVPN Service failed to start. Check logs: journalctl -u zivpn.service${C_RESET}"
     fi
@@ -5234,7 +5246,7 @@ uninstall_zivpn() {
     local iface
     iface=$(ip -4 route ls | grep default | grep -Po '(?<=dev )(\S+)' | head -1)
     if [ -n "$iface" ]; then
-        iptables -t nat -D PREROUTING -i "$iface" -p udp --dport 61000:62000 -j DNAT --to-destination :5667 2>/dev/null || true
+        iptables -t nat -D PREROUTING -i "$iface" -p udp --dport 6000:19999 -j DNAT --to-destination :5667 2>/dev/null || true
     fi
     
     echo -e "${C_BLUE}🗑️ Removing files...${C_RESET}"
@@ -8078,10 +8090,11 @@ RETURN=tcp:49222
 RETURN=udp:53
 RETURN=udp:5300
 RETURN=udp:7300
-# ZiVPN listens on 5667. Clients reach it via the 61000:62000 UDP DNAT range
-# below (port hopping), and 5667 itself is also kept open directly via this
-# RETURN exception (5667 sits inside the udp:1:5999 range and would otherwise
-# be hijacked into udp-custom/36712). Point ZIVPN configs at UDP 61000-62000.
+# ZiVPN listens on 5667. Clients reach it via the 6000:19999 UDP DNAT range
+# below (port hopping — the standard ZiVPN band that injector apps use), and
+# 5667 itself is also kept open directly via this RETURN exception (5667 sits
+# inside the udp:1:5999 range and would otherwise be hijacked into
+# udp-custom/36712). Point ZiVPN configs at UDP 6000-19999.
 RETURN=udp:5667
 # udp-custom listens on 36712. Clients reach it via the UDP DNAT ranges below
 # (port hopping into 36712); its own listen port is also kept directly reachable
@@ -8092,14 +8105,13 @@ RETURN=udp:36712
 # NOTE: no blanket TCP DNAT — HTTP Custom (SSH/SSL over TCP) must reach its own
 # listeners untouched. Only UDP is forwarded to the relays, so TCP and UDP
 # (ZiVPN / udp-custom) coexist without conflict.
-# UDP partition, no overlaps (order-independent; no first-match shadow):
-#   1:5999  + 62001:65535  -> udp-custom  (36712)
-#   61000:62000            -> ZiVPN       (5667)
-#   6000:60999             -> passthrough (left untouched)
+# UDP partition, full coverage, no overlaps (order-independent; no shadowing):
+#   1:5999  + 20000:65535  -> udp-custom  (36712)
+#   6000:19999             -> ZiVPN       (5667)
 # Do NOT put inline "#" comments on DNAT= lines — the value is parsed by ":".
+DNAT=udp:6000:19999:5667
 DNAT=udp:1:5999:36712
-DNAT=udp:61000:62000:5667
-DNAT=udp:62001:65535:36712
+DNAT=udp:20000:65535:36712
 RULES
 }
 
@@ -8119,6 +8131,18 @@ _nat_load_rules() {
     # 20000:60999 range simply becomes UDP passthrough. Idempotent.
     if grep -qE '^(DNAT=udp:20000:60999:36713|RETURN=udp:36713)$' "$NAT_RULES_CONF" 2>/dev/null; then
         sed -ri '/^DNAT=udp:20000:60999:36713$/d; /^RETURN=udp:36713$/d' "$NAT_RULES_CONF" 2>/dev/null
+    fi
+    # Self-heal installs that used the narrow ZiVPN DNAT window (61000:62000).
+    # Widen it to the standard 6000:19999 ZiVPN band and hand the freed
+    # 20000:65535 back to udp-custom, so port-hopping ZiVPN clients (which use
+    # 6000:19999) actually reach 5667 instead of the old 6000:60999 passthrough
+    # hole. Fires only on the exact old default lines; idempotent, and leaves
+    # any hand-customised DNAT rules untouched.
+    if grep -q '^DNAT=udp:61000:62000:5667$' "$NAT_RULES_CONF" 2>/dev/null; then
+        sed -ri \
+            -e 's/^DNAT=udp:61000:62000:5667$/DNAT=udp:6000:19999:5667/' \
+            -e 's/^DNAT=udp:62001:65535:36712$/DNAT=udp:20000:65535:36712/' \
+            "$NAT_RULES_CONF" 2>/dev/null
     fi
     # Migrate old-format RETURN=<port> (no protocol) to RETURN=tcp:<port>
     if grep -qP '^RETURN=\d+$' "$NAT_RULES_CONF" 2>/dev/null; then
