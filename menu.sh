@@ -130,13 +130,8 @@ HYSTERIA2_PORT="20001"
 SHADOWSOCKS_PORT="2443"
 SHADOWSOCKS2_PORT="3443"
 SOCKS5_PORT="1080"
-SLOWUDP_PORT="9400"
-OHP_PORT_1="8181"
-OHP_PORT_2="8282"
-OHP_PORT_3="8383"
 SQUID_PORT="3128"
 STUNNEL_PORT="777"
-UDP_REQUEST_PORT="36713"
 ARGO_TUNNEL_HTTP="2052"
 ARGO_TUNNEL_HTTPS="2053"
 REST_API_PORT="9000"
@@ -150,9 +145,9 @@ SERVICE_INFO_DB=(
   "SSH:OpenSSH server for secure shell access. Default: 22. Conflicts: none."
   "HAProxy:Protocol-aware edge proxy/load balancer on 80/443. Routes SSH, HTTP, TLS. Default: 80, 443. Conflicts: Stunnel, Argo on same ports."
   "ZiVPN:Custom UDP VPN protocol for tunnel connections. Default: 5667. Conflicts: none."
-  "UDP-Custom:Custom UDP tunneling protocol, popular for VPN. Default: 36712. Conflicts: UDP Request if same port."
+  "UDP-Custom:Custom UDP tunneling protocol, popular for VPN. Default: 36712. Conflicts: none."
   "BadVPN:UDP gateway for forwarding UDP traffic. Default: 7300. Conflicts: none."
-  "DNSTT:DNS-over-HTTPS tunnel (SlowDNS). Default: 53. Conflicts: SlowUDP if same port."
+  "DNSTT:DNS-over-HTTPS tunnel (SlowDNS). Default: 53. Conflicts: none."
   "Nginx:Internal reverse proxy for WebSocket/gRPC. Default: 8880, 8443. Conflicts: Argo on same ports."
   "FalconProxy:Lightweight TCP/UDP proxy with version selection. Default: 8080. Conflicts: none."
   "Dropbear:Lightweight SSH server alternative, more connections. Default: 109, 143. Conflicts: none."
@@ -161,11 +156,8 @@ SERVICE_INFO_DB=(
   "Hysteria:HTTP/3 (QUIC) proxy to bypass DPI/censorship. Default: random high UDP. Conflicts: none (avoid 443/8443)."
   "ShadowSocks:Lightweight secure proxy protocol. Default: 2443, 3443. Conflicts: none."
   "Socks5:Simple SOCKS5 proxy for tunnel routing. Default: 1080. Conflicts: none."
-  "SlowUDP:UDP variant of SlowDNS for DNS tunneling. Default: 9400. Conflicts: DNSTT if same port."
-  "OHP:Open HTTP Puncher - HTTP tunnel for restricted networks. Default: 8181, 8282, 8383. Conflicts: none."
   "Squid:HTTP forward proxy with caching. Default: 3128. Conflicts: none."
   "Stunnel:SSL/TLS wrapper for non-encrypted connections. Default: 777. Conflicts: HAProxy if set to 443."
-  "UDP-Request:UDP request tunnel, configurable port. Default: 36713. Conflicts: UDP Custom if same port."
   "Argo-Tunnel:Cloudflare Tunnel - outbound-only reverse proxy via Cloudflare. Default: 2052, 2053. Conflicts: HAProxy/Nginx if set to 80/443/8880/8443."
   "Rest-API:RESTful API on port 9000 for programmatic user management. Default: 9000. Conflicts: none."
   "WS-SSH:WebSocket SSH proxy — bridges WebSocket to SSH without FalconProxy. Accessible via 80/443 through HAProxy/Nginx. Conflicts: none."
@@ -2083,12 +2075,10 @@ create_user() {
     echo -e "\n${C_DIM}Select the target application for this account:${C_RESET}"
     printf "  ${C_GREEN}[1]${C_RESET} %-16s ${C_DIM}(HTTP Custom / SSH Tunnel / HWID)${C_RESET}\n" "HTTP Custom"
     printf "  ${C_GREEN}[2]${C_RESET} %-16s ${C_DIM}(ZiVPN / UDP VPN / HWID)${C_RESET}\n" "ZiVPN"
-    printf "  ${C_GREEN}[3]${C_RESET} %-16s ${C_DIM}(UDP Request / HWID)${C_RESET}\n" "UDP Request"
     read -p "👉 App type [1]: " app_choice
     app_choice=${app_choice:-1}
     case "$app_choice" in
         2|z|Z|zivpn|ZiVPN) app="zivpn" ;;
-        3|u|U|udp|UDP|udpreq|UDPReq|udp_request) app="udp_request" ;;
         *) app="http" ;;
     esac
     echo -e "${C_GREEN}✅ App type set to: ${C_YELLOW}$app${C_RESET}\n"
@@ -2096,11 +2086,11 @@ create_user() {
     # Optional HWID device lock. Blank = no restriction (credentials usable on any
     # device). When set, the user can optionally be strict-enforced by the daemon.
     # Only offered for apps whose service logs can actually report a device token
-    # (HTTP Custom / udp-custom, ZiVPN, UDP Request); HWID can't be enforced for the
+    # (HTTP Custom / udp-custom, ZiVPN); HWID can't be enforced for the
     # other app types, so the prompt is skipped for them.
     local hwid="" strict="0"
     case "$app" in
-        http|zivpn|udp_request)
+        http|zivpn)
             echo -e "${C_DIM}Leave blank for no device lock (works on multiple devices).${C_RESET}"
             echo -e "${C_DIM}For several devices, separate HWIDs with commas (e.g. hwidA,hwidB).${C_RESET}"
             read -p "🔒 Enter HWID(s) from VPN app (optional): " hwid
@@ -2349,7 +2339,6 @@ view_user_details() {
         hysteria2)   app_display="${C_CYAN}Hysteria2${C_RESET}" ;;
         shadowsocks) app_display="${C_CYAN}ShadowSocks${C_RESET}" ;;
         socks5)      app_display="${C_CYAN}SOCKS5${C_RESET}" ;;
-        udp_request) app_display="${C_CYAN}UDP Request${C_RESET}" ;;
     esac
 
     echo
@@ -2409,7 +2398,6 @@ edit_user() {
             hysteria2)   app_display="${C_CYAN}Hysteria2${C_RESET}" ;;
             shadowsocks) app_display="${C_CYAN}ShadowSocks${C_RESET}" ;;
             socks5)      app_display="${C_CYAN}SOCKS5${C_RESET}" ;;
-            udp_request) app_display="${C_CYAN}UDP Request${C_RESET}" ;;
         esac
         echo -e "\n  ${C_DIM}Current: Pass=${C_YELLOW}$cur_pass${C_RESET}${C_DIM} Exp=${C_YELLOW}$cur_expiry${C_RESET}${C_DIM} (${C_CYAN}${_days_disp} left${C_RESET}${C_DIM}) Conn=${C_YELLOW}$cur_limit${C_RESET}${C_DIM} BW=${C_YELLOW}$cur_bw_display${C_RESET}${C_DIM} Used=${C_CYAN}$bw_used_display${C_RESET}"
         echo -e "  ${C_DIM}HWID=${C_RESET}${hwid_display}  ${C_DIM}App=${C_RESET}${app_display}"
@@ -2644,7 +2632,6 @@ edit_user() {
                   printf "  ${C_GREEN}[5]${C_RESET} %-16s\n" "Hysteria2"
                   printf "  ${C_GREEN}[6]${C_RESET} %-16s\n" "ShadowSocks"
                   printf "  ${C_GREEN}[7]${C_RESET} %-16s\n" "SOCKS5"
-                  printf "  ${C_GREEN}[8]${C_RESET} %-16s\n" "UDP Request"
                   read -p "👉 App type [1]: " app_choice
                   app_choice=${app_choice:-1}
                   case "$app_choice" in
@@ -2654,7 +2641,6 @@ edit_user() {
                       5|h|H|hysteria|Hysteria2)    new_app="hysteria2" ;;
                       6|s|S|shadowsocks|ShadowSocks) new_app="shadowsocks" ;;
                       7|socks5|SOCKS5)             new_app="socks5" ;;
-                      8|u|U|udp|UDP|udpreq|UDPReq) new_app="udp_request" ;;
                       *)                           new_app="http" ;;
                   esac
                   db_set_user "$username" "$cur_pass" "$cur_expiry" "$cur_limit" "$cur_bw" "$cur_marker" "$cur_hwid" "$cur_strict" "$new_app"
@@ -2743,8 +2729,6 @@ _ff_udp_session_blip() {
                 udpgw)                   port="" ;;  # localhost only, no external port to flush
                 hysteria-server)         port="$HYSTERIA2_PORT" ;;
                 shadowsocks-libev) port="$SHADOWSOCKS_PORT" ;;
-                slowudp)                 port="$SLOWUDP_PORT" ;;
-                udp-request)             port="$UDP_REQUEST_PORT" ;;
                 *)                       port="" ;;
             esac
             [[ -n "$port" ]] && conntrack -D -p udp --dport "$port" &>/dev/null
@@ -2753,11 +2737,6 @@ _ff_udp_session_blip() {
         # too, matched by their pre-DNAT (original) destination port.
         if printf '%s\n' "${targets[@]}" | grep -qx zivpn; then
             conntrack -D -p udp --dport 61000:62000 &>/dev/null || true
-        fi
-        # udp-request also accepts the 20000-60999 range (DNAT -> 36713); clear
-        # those too, matched by their pre-DNAT (original) destination port.
-        if printf '%s\n' "${targets[@]}" | grep -qx udp-request; then
-            conntrack -D -p udp --dport 20000:60999 &>/dev/null || true
         fi
     fi
 
@@ -2838,8 +2817,6 @@ _ff_restore_user_all_protocols() {
     systemctl is-active --quiet udp-custom 2>/dev/null && systemctl try-restart udp-custom.service 2>/dev/null
     systemctl is-active --quiet hysteria-server 2>/dev/null && systemctl try-restart hysteria-server 2>/dev/null
     systemctl is-active --quiet shadowsocks-libev 2>/dev/null && systemctl try-restart shadowsocks-libev 2>/dev/null
-    systemctl is-active --quiet slowudp 2>/dev/null && systemctl try-restart slowudp 2>/dev/null
-    systemctl is-active --quiet udp-request 2>/dev/null && systemctl try-restart udp-request 2>/dev/null
 }
 
 lock_user() {
@@ -2881,8 +2858,6 @@ lock_user() {
         systemctl is-active --quiet udpgw 2>/dev/null && blip+=(udpgw)
         systemctl is-active --quiet hysteria-server 2>/dev/null && blip+=(hysteria-server)
         systemctl is-active --quiet shadowsocks-libev 2>/dev/null && blip+=(shadowsocks-libev)
-        systemctl is-active --quiet slowudp 2>/dev/null && blip+=(slowudp)
-        systemctl is-active --quiet udp-request 2>/dev/null && blip+=(udp-request)
         [[ "$zivpn_changed" == true ]] && blip+=(zivpn)
         if [[ ${#blip[@]} -gt 0 ]]; then
             echo -e "${C_DIM}⚡ Dropping live UDP sessions (fast blip: ${blip[*]})...${C_RESET}"
@@ -2922,8 +2897,6 @@ unlock_user() {
     systemctl is-active --quiet udp-custom 2>/dev/null && systemctl try-restart udp-custom.service 2>/dev/null
     systemctl is-active --quiet hysteria-server 2>/dev/null && systemctl try-restart hysteria-server 2>/dev/null
     systemctl is-active --quiet shadowsocks-libev 2>/dev/null && systemctl try-restart shadowsocks-libev 2>/dev/null
-    systemctl is-active --quiet slowudp 2>/dev/null && systemctl try-restart slowudp 2>/dev/null
-    systemctl is-active --quiet udp-request 2>/dev/null && systemctl try-restart udp-request 2>/dev/null
 }
 
 # Compact "days left until expiry" string for an expiry date (YYYY-MM-DD), given
@@ -5214,7 +5187,7 @@ drop_ip() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') - KICKED $ip (wrong HWID) for $who" >> "$KICK_LOG"
 }
 
-journalctl -u udp-custom -u zivpn -u hysteria-server -u shadowsocks-libev -u slowudp -u udp-request -n0 -f --no-pager 2>/dev/null | while IFS= read -r line; do
+journalctl -u udp-custom -u zivpn -u hysteria-server -u shadowsocks-libev -n0 -f --no-pager 2>/dev/null | while IFS= read -r line; do
     # Only react to lines that look like a successful client connection.
     echo "$line" | grep -qiE 'client connected|user connected|accepted|authenticated|new session' || continue
 
@@ -6559,20 +6532,11 @@ show_banner() {
     if systemctl is-active --quiet danted; then
         svc_lbl+=("Socks5:"); svc_val+=("${SOCKS5_PORT}")
     fi
-    if systemctl is-active --quiet slowudp; then
-        svc_lbl+=("SlowUDP:"); svc_val+=("${SLOWUDP_PORT}")
-    fi
-    if systemctl is-active --quiet ohp; then
-        svc_lbl+=("OHP:"); svc_val+=("${OHP_PORT_1}/${OHP_PORT_2}/${OHP_PORT_3}")
-    fi
     if systemctl is-active --quiet squid; then
         svc_lbl+=("Squid:"); svc_val+=("${SQUID_PORT}")
     fi
     if systemctl is-active --quiet stunnel4; then
         svc_lbl+=("Stunnel:"); svc_val+=("${STUNNEL_PORT}")
-    fi
-    if systemctl is-active --quiet udp-request; then
-        svc_lbl+=("UDP-Request:"); svc_val+=("${UDP_REQUEST_PORT}")
     fi
     if systemctl is-active --quiet argo-tunnel; then
         svc_lbl+=("Argo:"); svc_val+=("${ARGO_TUNNEL_HTTP}, ${ARGO_TUNNEL_HTTPS}")
@@ -6624,13 +6588,10 @@ _PROTO_LIST=(
     "10|HYSTERIA 1/2|hysteria-server"
     "11|SHADOWSOCKS|shadowsocks-libev"
     "12|SOCKS5 PROXY|danted"
-    "13|SLOWUDP|slowudp"
-    "14|OHP|ohp"
-    "15|SQUID PROXY|squid"
-    "16|STUNNEL|stunnel4"
-    "17|UDP REQUEST|udp-request"
-    "18|ARGO TUNNEL|argo-tunnel"
-    "19|WS-SSH|ws-ssh"
+    "13|SQUID PROXY|squid"
+    "14|STUNNEL|stunnel4"
+    "15|ARGO TUNNEL|argo-tunnel"
+    "16|WS-SSH|ws-ssh"
 )
 
 # Print the roster two per row with live status tags. $1 is the arrow/verb
@@ -6706,13 +6667,10 @@ install_protocols_menu() {
             10) install_hysteria; press_enter ;;
             11) install_shadowsocks; press_enter ;;
             12) install_socks5; press_enter ;;
-            13) install_slowudp; press_enter ;;
-            14) install_ohp; press_enter ;;
-            15) install_squid; press_enter ;;
-            16) install_stunnel; press_enter ;;
-            17) install_udp_request; press_enter ;;
-            18) install_argo_tunnel; press_enter ;;
-            19) install_ws_ssh; press_enter ;;
+            13) install_squid; press_enter ;;
+            14) install_stunnel; press_enter ;;
+            15) install_argo_tunnel; press_enter ;;
+            16) install_ws_ssh; press_enter ;;
             0) return ;;
             *) invalid_option ;;
         esac
@@ -6744,13 +6702,10 @@ uninstall_protocols_menu() {
             10) uninstall_hysteria; press_enter ;;
             11) uninstall_shadowsocks; press_enter ;;
             12) uninstall_socks5; press_enter ;;
-            13) uninstall_slowudp; press_enter ;;
-            14) uninstall_ohp; press_enter ;;
-            15) uninstall_squid; press_enter ;;
-            16) uninstall_stunnel; press_enter ;;
-            17) uninstall_udp_request; press_enter ;;
-            18) uninstall_argo_tunnel; press_enter ;;
-            19) uninstall_ws_ssh; press_enter ;;
+            13) uninstall_squid; press_enter ;;
+            14) uninstall_stunnel; press_enter ;;
+            15) uninstall_argo_tunnel; press_enter ;;
+            16) uninstall_ws_ssh; press_enter ;;
             0) return ;;
             *) invalid_option ;;
         esac
@@ -6895,11 +6850,8 @@ uninstall_script() {
     uninstall_hysteria 2>/dev/null
     uninstall_shadowsocks 2>/dev/null
     uninstall_socks5 2>/dev/null
-    uninstall_slowudp 2>/dev/null
-    uninstall_ohp 2>/dev/null
     uninstall_squid 2>/dev/null
     uninstall_stunnel 2>/dev/null
-    uninstall_udp_request 2>/dev/null
     uninstall_argo_tunnel 2>/dev/null
     uninstall_ws_ssh 2>/dev/null
     systemctl stop rest-api 2>/dev/null; systemctl disable rest-api 2>/dev/null
@@ -7038,12 +6990,10 @@ create_trial_account() {
     echo -e "\n${C_DIM}Select target application:${C_RESET}"
     printf "  ${C_GREEN}[1]${C_RESET} %-16s ${C_DIM}(HTTP Custom)${C_RESET}\n" "HTTP Custom"
     printf "  ${C_GREEN}[2]${C_RESET} %-16s ${C_DIM}(ZiVPN)${C_RESET}\n" "ZiVPN"
-    printf "  ${C_GREEN}[3]${C_RESET} %-16s ${C_DIM}(UDP Request)${C_RESET}\n" "UDP Request"
     read -p "👉 App type [1]: " app_choice
     app_choice=${app_choice:-1}
     case "$app_choice" in
         2|z|Z|zivpn|ZiVPN)           app="zivpn" ;;
-        3|u|U|udp|UDP|udpreq|UDPReq|udp_request) app="udp_request" ;;
         *)                           app="http" ;;
     esac
 
@@ -7251,12 +7201,10 @@ bulk_create_users() {
     echo -e "\n${C_DIM}Select target application for all users:${C_RESET}"
     printf "  ${C_GREEN}[1]${C_RESET} %-16s ${C_DIM}(HTTP Custom)${C_RESET}\n" "HTTP Custom"
     printf "  ${C_GREEN}[2]${C_RESET} %-16s ${C_DIM}(ZiVPN)${C_RESET}\n" "ZiVPN"
-    printf "  ${C_GREEN}[3]${C_RESET} %-16s ${C_DIM}(UDP Request)${C_RESET}\n" "UDP Request"
     read -p "👉 App type [1]: " app_choice
     app_choice=${app_choice:-1}
     case "$app_choice" in
         2|z|Z|zivpn|ZiVPN)           app="zivpn" ;;
-        3|u|U|udp|UDP|udpreq|UDPReq|udp_request) app="udp_request" ;;
         *)                           app="http" ;;
     esac
 
@@ -7970,25 +7918,21 @@ RETURN=udp:7300
 # RETURN exception (5667 sits inside the udp:1:5999 range and would otherwise
 # be hijacked into udp-custom/36712). Point ZIVPN configs at UDP 61000-62000.
 RETURN=udp:5667
-# udp-custom (36712) and udp-request (36713) each own a DNAT range below, but
-# their OWN listen ports must stay directly reachable: 36712 and 36713 both sit
-# inside udp-request's 20000:60999 range and would otherwise be hijacked. These
-# RETURN exceptions (applied before any DNAT) keep each relay reachable on its
-# own port regardless of how the ranges are partitioned.
+# udp-custom listens on 36712. Clients reach it via the UDP DNAT ranges below
+# (port hopping into 36712); its own listen port is also kept directly reachable
+# via this RETURN exception (applied before any DNAT) so the relay stays
+# reachable on 36712 itself.
 RETURN=udp:36712
-RETURN=udp:36713
 # DNAT rules  (format: proto:port_or_range:target_port)
 # NOTE: no blanket TCP DNAT — HTTP Custom (SSH/SSL over TCP) must reach its own
 # listeners untouched. Only UDP is forwarded to the relays, so TCP and UDP
-# (ZiVPN / udp-custom / udp-request) coexist without conflict.
-# Three-way UDP partition, no overlaps (order-independent; no first-match shadow):
+# (ZiVPN / udp-custom) coexist without conflict.
+# UDP partition, no overlaps (order-independent; no first-match shadow):
 #   1:5999  + 62001:65535  -> udp-custom  (36712)
-#   20000:60999            -> udp-request (36713)
 #   61000:62000            -> ZiVPN       (5667)
-#   6000:19999             -> passthrough (e.g. SlowUDP 9400 stays untouched)
+#   6000:60999             -> passthrough (left untouched)
 # Do NOT put inline "#" comments on DNAT= lines — the value is parsed by ":".
 DNAT=udp:1:5999:36712
-DNAT=udp:20000:60999:36713
 DNAT=udp:61000:62000:5667
 DNAT=udp:62001:65535:36712
 RULES
@@ -8004,6 +7948,12 @@ _nat_load_rules() {
     # coexist. Safe and idempotent — only rewrites the file when present.
     if grep -q '^DNAT=tcp:1:65535:36712$' "$NAT_RULES_CONF" 2>/dev/null; then
         sed -i '/^DNAT=tcp:1:65535:36712$/d' "$NAT_RULES_CONF" 2>/dev/null
+    fi
+    # Self-heal installs that predate the UDP Request removal: drop its DNAT
+    # range (20000:60999 -> 36713) and its RETURN exception (36713). The freed
+    # 20000:60999 range simply becomes UDP passthrough. Idempotent.
+    if grep -qE '^(DNAT=udp:20000:60999:36713|RETURN=udp:36713)$' "$NAT_RULES_CONF" 2>/dev/null; then
+        sed -ri '/^DNAT=udp:20000:60999:36713$/d; /^RETURN=udp:36713$/d' "$NAT_RULES_CONF" 2>/dev/null
     fi
     # Migrate old-format RETURN=<port> (no protocol) to RETURN=tcp:<port>
     if grep -qP '^RETURN=\d+$' "$NAT_RULES_CONF" 2>/dev/null; then
@@ -8101,7 +8051,6 @@ _nat_show_rules() {
             case "$target" in
                 5667)  label="  (ZiVPN)" ;;
                 36712) label="  (udp-custom)" ;;
-                36713) label="  (udp-request)" ;;
             esac
             printf "  ${C_CHOICE}[D%2s]${C_RESET}  %-4s  %-17s  →  %-5s%s\n" "$((i+1))" "${proto^^}" "${port_low}:${port_high}" "$target" "$label"
         done
@@ -9815,99 +9764,6 @@ uninstall_socks5() {
     echo -e "${C_GREEN}✅ Socks5 proxy removed.${C_RESET}"
 }
 
-# ── SlowUDP (follows udp-custom pattern for HWID) ─────────
-install_slowudp() {
-    clear; show_banner
-    echo -e "${C_BOLD}${C_PURPLE}--- 🐢 Install SlowUDP ---${C_RESET}"
-    if systemctl is-active --quiet slowudp 2>/dev/null; then
-        echo -e "\n${C_YELLOW}ℹ️ SlowUDP is already installed.${C_RESET}"
-        return
-    fi
-    echo -e "\n${C_BLUE}📦 Installing SlowUDP...${C_RESET}"
-    local arch; arch=$(uname -m)
-    local url
-    case "$arch" in
-        x86_64)  url="https://github.com/slowudp/slowudp/releases/latest/download/slowudp-linux-amd64" ;;
-        aarch64) url="https://github.com/slowudp/slowudp/releases/latest/download/slowudp-linux-arm64" ;;
-        *) echo -e "${C_RED}❌ Unsupported arch.${C_RESET}"; return ;;
-    esac
-    ff_fetch_binary /usr/local/bin/slowudp "$url" || {
-        echo -e "${C_YELLOW}⚠️ Binary download failed. Install manually.${C_RESET}"
-        return
-    }
-    chmod +x /usr/local/bin/slowudp
-    check_and_open_firewall_port "$SLOWUDP_PORT" udp
-    cat > /etc/systemd/system/slowudp.service <<EOF
-[Unit]
-Description=SlowUDP Tunnel
-After=network.target
-[Service]
-Type=simple
-ExecStart=/usr/local/bin/slowudp -port ${SLOWUDP_PORT}
-Restart=always
-RestartSec=3
-[Install]
-WantedBy=multi-user.target
-EOF
-    systemctl daemon-reload
-    systemctl enable slowudp 2>/dev/null
-    systemctl restart slowudp 2>/dev/null
-    echo -e "${C_GREEN}✅ SlowUDP installed on port ${SLOWUDP_PORT}.${C_RESET}"
-}
-uninstall_slowudp() {
-    echo -e "\n${C_BLUE}🗑️ Removing SlowUDP...${C_RESET}"
-    systemctl stop slowudp 2>/dev/null; systemctl disable slowudp 2>/dev/null
-    rm -f /etc/systemd/system/slowudp.service /usr/local/bin/slowudp
-    systemctl daemon-reload
-    echo -e "${C_GREEN}✅ SlowUDP removed.${C_RESET}"
-}
-
-# ── OHP ───────────────────────────────────────────────────
-install_ohp() {
-    clear; show_banner
-    echo -e "${C_BOLD}${C_PURPLE}--- 🌉 Install Open HTTP Puncher ---${C_RESET}"
-    if systemctl is-active --quiet ohp 2>/dev/null; then
-        echo -e "\n${C_YELLOW}ℹ️ OHP is already installed.${C_RESET}"
-        return
-    fi
-    echo -e "\n${C_BLUE}📦 Installing OHP...${C_RESET}"
-    local arch; arch=$(uname -m)
-    local url
-    case "$arch" in
-        x86_64)  url="https://github.com/ophttp/ohp/releases/latest/download/ohp-linux-amd64" ;;
-        aarch64) url="https://github.com/ophttp/ohp/releases/latest/download/ohp-linux-arm64" ;;
-        *) echo -e "${C_RED}❌ Unsupported arch.${C_RESET}"; return ;;
-    esac
-    ff_fetch_binary /usr/local/bin/ohp "$url" || {
-        echo -e "${C_YELLOW}⚠️ Binary download failed. Install manually.${C_RESET}"
-        return
-    }
-    chmod +x /usr/local/bin/ohp
-    for p in $OHP_PORT_1 $OHP_PORT_2 $OHP_PORT_3; do check_and_open_firewall_port "$p" tcp; done
-    cat > /etc/systemd/system/ohp.service <<EOF
-[Unit]
-Description=Open HTTP Puncher
-After=network.target
-[Service]
-Type=simple
-ExecStart=/usr/local/bin/ohp -port ${OHP_PORT_1},${OHP_PORT_2},${OHP_PORT_3}
-Restart=always
-RestartSec=3
-[Install]
-WantedBy=multi-user.target
-EOF
-    systemctl daemon-reload
-    systemctl enable ohp 2>/dev/null; systemctl restart ohp 2>/dev/null
-    echo -e "${C_GREEN}✅ OHP installed on ports ${OHP_PORT_1}/${OHP_PORT_2}/${OHP_PORT_3}.${C_RESET}"
-}
-uninstall_ohp() {
-    echo -e "\n${C_BLUE}🗑️ Removing OHP...${C_RESET}"
-    systemctl stop ohp 2>/dev/null; systemctl disable ohp 2>/dev/null
-    rm -f /etc/systemd/system/ohp.service /usr/local/bin/ohp
-    systemctl daemon-reload
-    echo -e "${C_GREEN}✅ OHP removed.${C_RESET}"
-}
-
 # ── Squid Proxy ───────────────────────────────────────────
 install_squid() {
     clear; show_banner
@@ -9969,52 +9825,6 @@ uninstall_stunnel() {
     systemctl stop stunnel4 2>/dev/null; systemctl disable stunnel4 2>/dev/null
     ff_pkg_purge stunnel4 >/dev/null 2>&1
     echo -e "${C_GREEN}✅ Stunnel removed.${C_RESET}"
-}
-
-# ── UDP Request (follows udp-custom style for HWID) ───────
-install_udp_request() {
-    clear; show_banner
-    echo -e "${C_BOLD}${C_PURPLE}--- 📦 Install UDP Request ---${C_RESET}"
-    if systemctl is-active --quiet udp-request 2>/dev/null; then
-        echo -e "\n${C_YELLOW}ℹ️ UDP Request is already installed.${C_RESET}"
-        return
-    fi
-    echo -e "\n${C_BLUE}📦 Installing UDP Request...${C_RESET}"
-    local arch; arch=$(uname -m)
-    local url
-    case "$arch" in
-        x86_64)  url="https://github.com/udprequest/udp-request/releases/latest/download/udp-request-linux-amd64" ;;
-        aarch64) url="https://github.com/udprequest/udp-request/releases/latest/download/udp-request-linux-arm64" ;;
-        *) echo -e "${C_RED}❌ Unsupported arch.${C_RESET}"; return ;;
-    esac
-    ff_fetch_binary /usr/local/bin/udp-request "$url" || {
-        echo -e "${C_YELLOW}⚠️ Binary download failed. Install manually.${C_RESET}"
-        return
-    }
-    chmod +x /usr/local/bin/udp-request
-    check_and_open_firewall_port "$UDP_REQUEST_PORT" udp
-    cat > /etc/systemd/system/udp-request.service <<EOF
-[Unit]
-Description=UDP Request Tunnel
-After=network.target
-[Service]
-Type=simple
-ExecStart=/usr/local/bin/udp-request -port ${UDP_REQUEST_PORT}
-Restart=always
-RestartSec=3
-[Install]
-WantedBy=multi-user.target
-EOF
-    systemctl daemon-reload
-    systemctl enable udp-request 2>/dev/null; systemctl restart udp-request 2>/dev/null
-    echo -e "${C_GREEN}✅ UDP Request installed on port ${UDP_REQUEST_PORT}.${C_RESET}"
-}
-uninstall_udp_request() {
-    echo -e "\n${C_BLUE}🗑️ Removing UDP Request...${C_RESET}"
-    systemctl stop udp-request 2>/dev/null; systemctl disable udp-request 2>/dev/null
-    rm -f /etc/systemd/system/udp-request.service /usr/local/bin/udp-request
-    systemctl daemon-reload
-    echo -e "${C_GREEN}✅ UDP Request removed.${C_RESET}"
 }
 
 # ── Argo Tunnel ──────────────────────────────────────────
@@ -10295,11 +10105,8 @@ on_off_service_menu() {
             "hysteria-server:Hysteria"
             "shadowsocks-libev:ShadowSocks"
             "danted:Socks5"
-            "slowudp:SlowUDP"
-            "ohp:OHP"
             "squid:Squid"
             "stunnel4:Stunnel"
-            "udp-request:UDP-Request"
             "argo-tunnel:Argo"
             "badvpn:BadVPN"
             "udp-custom:UDP-Custom"
@@ -10606,11 +10413,8 @@ port_manager_menu() {
             "Hysteria:${HYSTERIA1_PORT}/${HYSTERIA2_PORT}"
             "ShadowSocks:${SHADOWSOCKS_PORT}"
             "Socks5:${SOCKS5_PORT}"
-            "SlowUDP:${SLOWUDP_PORT}"
-            "OHP:${OHP_PORT_1}, ${OHP_PORT_2}, ${OHP_PORT_3}"
             "Squid:${SQUID_PORT}"
             "Stunnel:${STUNNEL_PORT}"
-            "UDP-Request:${UDP_REQUEST_PORT}"
             "Argo:${ARGO_TUNNEL_HTTP}, ${ARGO_TUNNEL_HTTPS}"
             "Rest-API:${REST_API_PORT}"
             "WS-SSH:80, 443 (bridge:${WS_SSH_INTERNAL_PORT}) [$(grep -oP '^RESPONSE="\K[^"]*' "$WS_SSH_CONFIG_FILE" 2>/dev/null || echo 'HTTP/1.1 101 Switching Protocols')]"
@@ -10683,16 +10487,6 @@ port_manager_menu() {
                         sed -i "s/internal:.*port = .*/internal: 0.0.0.0 port = $new_port/" /etc/danted.conf 2>/dev/null
                         systemctl try-restart danted 2>/dev/null
                         SOCKS5_PORT="$new_port" ;;
-                    SlowUDP)
-                        sed -i "s/-port .*/-port $new_port/" /etc/systemd/system/slowudp.service 2>/dev/null
-                        systemctl daemon-reload; systemctl try-restart slowudp 2>/dev/null
-                        SLOWUDP_PORT="$new_port" ;;
-                    OHP)
-                        IFS=',' read -ra p <<< "$new_port"
-                        local _o1="${p[0]:-8181}" _o2="${p[1]:-8282}" _o3="${p[2]:-8383}"
-                        sed -i "s/-port .*/-port $_o1,$_o2,$_o3/" /etc/systemd/system/ohp.service 2>/dev/null
-                        systemctl daemon-reload; systemctl try-restart ohp 2>/dev/null
-                        OHP_PORT_1="$_o1"; OHP_PORT_2="$_o2"; OHP_PORT_3="$_o3" ;;
                     Squid)
                         sed -i "s/http_port .*/http_port $new_port/" /etc/squid/squid.conf 2>/dev/null
                         systemctl try-restart squid 2>/dev/null
@@ -10700,10 +10494,6 @@ port_manager_menu() {
                     Stunnel)
                         echo -e "${C_YELLOW}⚠️ Update /etc/stunnel/*.conf manually with new port.${C_RESET}"
                         STUNNEL_PORT="$new_port" ;;
-                    UDP-Request)
-                        sed -i "s/-port .*/-port $new_port/" /etc/systemd/system/udp-request.service 2>/dev/null
-                        systemctl daemon-reload; systemctl try-restart udp-request 2>/dev/null
-                        UDP_REQUEST_PORT="$new_port" ;;
                     Argo)
                         echo -e "${C_YELLOW}⚠️ Argo tunnel port configured via cloudflared config. Update manually.${C_RESET}" ;;
                     Rest-API)
@@ -10816,11 +10606,6 @@ service_info_menu() {
             echo
             echo -e "   ${C_WHITE}── SOCKS5 (Dante)${C_RESET}"
             echo -e "      ${C_DIM}nano /etc/danted.conf${C_RESET}"
-            echo
-            echo -e "   ${C_WHITE}── SlowUDP / OHP / UDP-Request (systemd)${C_RESET}"
-            echo -e "      ${C_DIM}nano /etc/systemd/system/slowudp.service${C_RESET}"
-            echo -e "      ${C_DIM}nano /etc/systemd/system/ohp.service${C_RESET}"
-            echo -e "      ${C_DIM}nano /etc/systemd/system/udp-request.service${C_RESET}"
             echo
             echo -e "   ${C_WHITE}── Squid${C_RESET}"
             echo -e "      ${C_DIM}nano /etc/squid/squid.conf${C_RESET}"
