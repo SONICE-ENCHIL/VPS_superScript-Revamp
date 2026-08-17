@@ -27,8 +27,8 @@ It takes less than a minute to deploy the complete VPS_superScript Manager on yo
 bash <(curl -Ls https://github.com/SONICE-ENCHIL/VPS_superScript/raw/main/install.sh)
 ```
 
-> **🔄 Upgrading from an existing FirewallFalcon installation?**  
-> The installer automatically detects your old setup and safely migrates all data — users, bandwidth logs, SSL certificates, banners, trial accounts, HWID locks, DNSTT keys, and backups — to the new VPS_superScript paths. Nothing is lost.
+> **🔄 Upgrading from an existing FirewallFalcon or skylartech-manager installation?**  
+> The installer automatically detects your old setup and safely migrates all data — users & passwords, bandwidth logs, SSL certificates, banners, trial accounts, HWID/ZiVPN locks, DNSTT keys, state flags, and backups — to the new VPS_superScript paths. Nothing is lost. For skylartech the import runs once on the first install and never overwrites existing VPS_superScript accounts, and your old `/etc/skylartech` data is left intact as a fallback.
 
 *(Once installed, simply type `menu` in your terminal to launch the interface!)*
 

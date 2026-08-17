@@ -631,6 +631,71 @@ migrate_from_firewallfalcon() {
     echo -e "${C_GREEN}✅ Migration complete.${C_RESET}"
 }
 
+migrate_from_skylartech() {
+    # One-time import of an existing skylartech-manager install on the SAME box.
+    # skylartech and VPS_superScript both descend from FirewallFalcon and share an
+    # identical users.db row format (user:pass:expiry:limit:bw::hwid:strict:app) and
+    # data-store layout, so accounts, passwords, bandwidth counters, HWID/ZiVPN
+    # locks, trials, certs, DNSTT keys, banners and on/off state flags all carry
+    # over 1:1. Unlike migrate_from_firewallfalcon() we COPY (never move), leaving
+    # /etc/skylartech fully intact as a fallback.
+    local OLD="/etc/skylartech"
+    [[ -d "$OLD" ]] || return 0
+
+    # Never clobber existing VPS_superScript data. Skip if this box has already
+    # completed a VPS_superScript setup, or already has users in its db (e.g. a
+    # FirewallFalcon migration ran moments ago — that data wins, since a box can't
+    # meaningfully have carried both lineages into the same slot).
+    [[ -f "$INSTALL_FLAG_FILE" ]] && return 0
+    local dest_rows=0
+    [[ -f "$DB_FILE" ]] && dest_rows="$(grep -c . "$DB_FILE" 2>/dev/null || echo 0)"
+    [[ "$dest_rows" -gt 0 ]] && return 0
+
+    echo -e "${C_YELLOW}⚠️ Detected existing skylartech-manager installation. Importing its accounts into VPS_superScript...${C_RESET}"
+
+    mkdir -p "$DB_DIR"
+
+    # Reversible: snapshot whatever VPS_superScript already has (normally nothing).
+    if [[ -n "$(ls -A "$DB_DIR" 2>/dev/null)" ]]; then
+        local ts; ts="$(date +%F-%H%M%S)"
+        if cp -a "$DB_DIR" "${DB_DIR}.pre-skylartech.${ts}" 2>/dev/null; then
+            echo -e "${C_BLUE}📦 Backed up current $DB_DIR → ${DB_DIR}.pre-skylartech.${ts}${C_RESET}"
+        fi
+    fi
+
+    # Copy EVERYTHING from skylartech so nothing is missed — users.db, all locks,
+    # counters, certs, keys, banners and every state flag. Data-dir contents are
+    # path-agnostic (the only dir-name references live in systemd units and sshd
+    # drop-ins, both OUTSIDE this directory and rebuilt fresh below), so a verbatim
+    # copy is safe. The directory is empty here (gated above), so it's a clean copy.
+    cp -a "$OLD/." "$DB_DIR/" 2>/dev/null || true
+    # Let initial_setup own the install-flag; don't inherit skylartech's marker.
+    rm -f "$DB_DIR/.install" 2>/dev/null || true
+
+    # Stop & disable the stale skylartech background services so they stop acting
+    # on the old /etc/skylartech state. Their unit names differ from
+    # VPS_superScript's, so the fresh install won't otherwise touch them. The
+    # shared protocol daemons (zivpn, dnstt, udp-custom, badvpn, ...) keep the same
+    # names in both and are left running. Disable — never delete.
+    local svc
+    for svc in skylartech-limiter skylartech-bandwidth skylartech-hwid-enforcer; do
+        if [[ -f "/etc/systemd/system/${svc}.service" ]]; then
+            systemctl disable --now "$svc" 2>/dev/null || true
+        fi
+    done
+
+    # Drop the stale skylartech sshd banner drop-in (it points at old paths). The
+    # correct new drop-in is rebuilt later in initial_setup from the imported data.
+    rm -f /etc/ssh/sshd_config.d/skylartech.conf 2>/dev/null || true
+
+    local rows; rows="$(grep -c . "$DB_FILE" 2>/dev/null || echo 0)"
+    echo -e "${C_GREEN}✅ Imported ${rows} account(s) from skylartech. Old data left intact at $OLD as a fallback.${C_RESET}"
+
+    # Tell initial_setup to re-apply the imported per-user banners after its own
+    # banner-cleanup step (which would otherwise wipe them mid-setup).
+    _SKYLAR_IMPORTED=1
+}
+
 ensure_VPS_superScript_dirs() {
     mkdir -p "$DB_DIR" "$SSL_CERT_DIR" "$BANDWIDTH_DIR" "$TRIAL_EXPIRY_DIR" /etc/ssh/sshd_config.d
     touch "$DB_FILE"
@@ -954,6 +1019,7 @@ require_interactive_terminal() {
 
 initial_setup() {
     migrate_from_firewallfalcon
+    migrate_from_skylartech
     echo -e "${C_BLUE}⚙️ Initializing VPS_superScript Manager setup...${C_RESET}"
     check_environment
     
@@ -985,6 +1051,22 @@ initial_setup() {
     echo -e "${C_BLUE}🔹 Cleaning legacy dynamic SSH banner hooks...${C_RESET}"
     disable_dynamic_ssh_banner_system
     systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null || true
+
+    # If we just imported a skylartech install that had per-user SSH banners on,
+    # re-apply them now (the cleanup above wipes banners mid-setup). /etc/skylartech
+    # is our untouched source. Guarded by sshd -t so a bad config can never break SSH.
+    if [[ "${_SKYLAR_IMPORTED:-0}" == "1" && -f /etc/skylartech/banners_enabled && -d /etc/skylartech/banners ]]; then
+        echo -e "${C_BLUE}🔹 Re-applying per-user SSH banners imported from skylartech...${C_RESET}"
+        mkdir -p "$DB_DIR/banners"
+        cp -a /etc/skylartech/banners/. "$DB_DIR/banners/" 2>/dev/null || true
+        touch "$DB_DIR/banners_enabled"
+        update_ssh_banners_config
+        if ! sshd -t 2>/dev/null; then
+            rm -f "$SSHD_FF_CONFIG" "$DB_DIR/banners_enabled" 2>/dev/null
+            systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null || true
+            echo -e "${C_YELLOW}⚠️ Imported banner config failed validation — reverted it (SSH unaffected).${C_RESET}"
+        fi
+    fi
     
     echo -e "${C_BLUE}🔹 Installing iptables-persistent for reboot survival...${C_RESET}"
     ff_pkg_install iptables-persistent >/dev/null 2>&1 || true
