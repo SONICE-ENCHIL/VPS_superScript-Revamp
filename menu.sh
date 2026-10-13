@@ -32,7 +32,7 @@ DB_FILE="$DB_DIR/users.db"
 INSTALL_FLAG_FILE="$DB_DIR/.install"
 BADVPN_SERVICE_FILE="/etc/systemd/system/badvpn.service"
 BADVPN_BUILD_DIR="/root/badvpn-build"
-HAPROXY_CONFIG="/etc/haproxy/haproxy.cfg"
+
 NGINX_CONFIG_FILE="/etc/nginx/sites-available/default"
 SSL_CERT_DIR="/etc/VPS_superScript/ssl"
 SSL_CERT_FILE="$SSL_CERT_DIR/VPS_superScript.pem"
@@ -44,7 +44,7 @@ EDGE_PUBLIC_HTTP_PORT="80"
 EDGE_PUBLIC_TLS_PORT="443"
 NGINX_INTERNAL_HTTP_PORT="8880"
 NGINX_INTERNAL_TLS_PORT="8443"
-HAPROXY_INTERNAL_DECRYPT_PORT="10443"
+
 DNSTT_SERVICE_FILE="/etc/systemd/system/dnstt.service"
 DNSTT_BINARY="/usr/local/bin/dnstt-server"
 DNSTT_KEYS_DIR="/etc/VPS_superScript/dnstt"
@@ -128,39 +128,25 @@ WIREGUARD_PORT="51820"
 HYSTERIA1_PORT="20000"
 HYSTERIA2_PORT="20001"
 SHADOWSOCKS_PORT="2443"
-SHADOWSOCKS2_PORT="3443"
 SOCKS5_PORT="1080"
-SQUID_PORT="3128"
 STUNNEL_PORT="777"
-ARGO_TUNNEL_HTTP="2052"
-ARGO_TUNNEL_HTTPS="2053"
-REST_API_PORT="9000"
-WS_SSH_INTERNAL_PORT="2082"
-WS_SSH_SCRIPT="/usr/local/bin/ws-ssh-proxy.py"
-WS_SSH_SERVICE="/etc/systemd/system/ws-ssh.service"
-WS_SSH_CONFIG_FILE="$DB_DIR/ws_ssh_config.conf"
 
 # ── Service Info Database (for Service Info menu) ──
 SERVICE_INFO_DB=(
   "SSH:OpenSSH server for secure shell access. Default: 22. Conflicts: none."
-  "HAProxy:Protocol-aware edge proxy/load balancer on 80/443. Routes SSH, HTTP, TLS. Default: 80, 443. Conflicts: Stunnel, Argo on same ports."
   "ZiVPN:Custom UDP VPN protocol for tunnel connections. Default: 5667. Conflicts: none."
   "UDP-Custom:Custom UDP tunneling protocol, popular for VPN. Default: 36712. Conflicts: none."
   "BadVPN:UDP gateway for forwarding UDP traffic. Default: 7300. Conflicts: none."
   "DNSTT:DNS-over-HTTPS tunnel (SlowDNS). Default: 53. Conflicts: none."
-  "Nginx:Internal reverse proxy for WebSocket/gRPC. Default: 8880, 8443. Conflicts: Argo on same ports."
-  "FalconProxy:Lightweight TCP/UDP proxy with version selection. Default: 8080. Conflicts: none."
+  "Nginx:Internal reverse proxy for WebSocket/gRPC. Default: 8880, 8443. Conflicts: none."
   "Dropbear:Lightweight SSH server alternative, more connections. Default: 109, 143. Conflicts: none."
   "OpenVPN:Full VPN tunnel with TCP/UDP/SlowDNS modes. Default: 1194, 2200, 25000. Conflicts: none."
   "WireGuard:Fast kernel-level VPN with modern crypto. Default: 51820. Conflicts: none."
   "Hysteria:HTTP/3 (QUIC) proxy to bypass DPI/censorship. Default: random high UDP. Conflicts: none (avoid 443/8443)."
   "ShadowSocks:Lightweight secure proxy protocol. Default: 2443, 3443. Conflicts: none."
   "Socks5:Simple SOCKS5 proxy for tunnel routing. Default: 1080. Conflicts: none."
-  "Squid:HTTP forward proxy with caching. Default: 3128. Conflicts: none."
-  "Stunnel:SSL/TLS wrapper for non-encrypted connections. Default: 777. Conflicts: HAProxy if set to 443."
-  "Argo-Tunnel:Cloudflare Tunnel - outbound-only reverse proxy via Cloudflare. Default: 2052, 2053. Conflicts: HAProxy/Nginx if set to 80/443/8880/8443."
-  "Rest-API:RESTful API on port 9000 for programmatic user management. Default: 9000. Conflicts: none."
-  "WS-SSH:WebSocket SSH proxy — bridges WebSocket to SSH without FalconProxy. Accessible via 80/443 through HAProxy/Nginx. Conflicts: none."
+  "Stunnel:SSL/TLS wrapper for non-encrypted connections. Default: 777. Conflicts: none."
+  "WS-SSH:WebSocket SSH proxy — bridges WebSocket to SSH without FalconProxy. Accessible via 80/443 through Nginx. Conflicts: none."
 )
 
 # --- Repository / binary source -------------------------------------------
@@ -872,6 +858,89 @@ _ff_hwid_label() {
     fi
 }
 
+# ── Duration & quota parsing (OnePesewa-compatible UX) ──────────────────────
+# Parse a duration like "30m", "2h", "1d", "2d4h30m" (or a bare number = days)
+# into a whole number of seconds. Echoes 0 when the value is empty/invalid.
+_ff_dur_to_seconds() {
+    local s; s=$(printf '%s' "$1" | tr 'A-Z' 'a-z' | tr -d ' ,')
+    [[ -z "$s" ]] && { echo 0; return; }
+    if [[ "$s" =~ ^[0-9]+$ ]]; then echo $(( s * 86400 )); return; fi
+    local total=0 matched=0
+    [[ "$s" =~ ([0-9]+)d ]] && { total=$(( total + BASH_REMATCH[1]*86400 )); matched=1; }
+    [[ "$s" =~ ([0-9]+)h ]] && { total=$(( total + BASH_REMATCH[1]*3600 ));  matched=1; }
+    [[ "$s" =~ ([0-9]+)m ]] && { total=$(( total + BASH_REMATCH[1]*60 ));    matched=1; }
+    [[ "$s" =~ ([0-9]+)s ]] && { total=$(( total + BASH_REMATCH[1] ));       matched=1; }
+    [[ "$matched" -eq 1 ]] && echo "$total" || echo 0
+}
+
+# Convert seconds to trial duration format (20d5h30m)
+expiry_human() {
+    local s="$1"; local total=0 hh mm dd
+    [[ -z "$s" || "$s" -le 0 ]] && { echo "0d left"; return; }
+    ((dd = s / 86400)); ((s %= 86400))
+    ((hh = s / 3600)); ((s %= 3600))
+    ((mm = s / 60)); ((s %= 60))
+    local out=""
+    [ "$dd" -gt 0 ] && out="${dd}d"
+    [ "$hh" -gt 0 ] && { [ -n "$out" ] && out+=", "; out+="${hh}h"; }
+    [ "$mm" -gt 0 ] && { [ -n "$out" ] && out+=", "; out+="${mm}m"; }
+    [ -z "$out" ] && out="0m"
+    printf '%s left' "$out"
+}
+
+# True (rc 0) when a quota entry is well-formed: 100MB / 2GB / 1.5GB / a bare
+# number (=GB, legacy) / 0 or blank (= unlimited). rc 1 otherwise.
+_ff_quota_valid() {
+    local up; up=$(printf '%s' "$1" | tr -d ' ' | tr 'a-z' 'A-Z')
+    [[ -z "$up" || "$up" == "0" ]] && return 0
+    [[ "$up" =~ ^[0-9]+(\.[0-9]+)?(GB|MB|KB)?$ ]] && return 0
+    return 1
+}
+
+# Normalise a quota entry to a tidy canonical string ("2GB", "500MB", "0").
+# Accepts 100MB / 2GB / 1.5GB / a bare number (=GB, legacy) / 0 (unlimited).
+_ff_quota_canonical() {
+    local up v; up=$(printf '%s' "$1" | tr -d ' ' | tr 'a-z' 'A-Z')
+    [[ -z "$up" ]] && { echo "0"; return; }
+    case "$up" in
+        *GB) v="${up%GB}" ;;
+        *MB) v="${up%MB}" ;;
+        *KB) v="${up%KB}" ;;
+        *)   v="$up" ;;
+    esac
+    [[ "$v" =~ ^[0-9]+(\.[0-9]+)?$ ]] || { echo "0"; return; }
+    awk "BEGIN{exit !($v>0)}" || { echo "0"; return; }
+    case "$up" in
+        *GB) echo "${v}GB" ;;
+        *MB) echo "${v}MB" ;;
+        *KB) echo "${v}KB" ;;
+        *)   echo "${v}GB" ;;
+    esac
+}
+
+# Convert a stored quota field (canonical "2GB"/"500MB", legacy bare number =GB,
+# or "0"/empty = unlimited) into a whole number of bytes. Echoes 0 for unlimited.
+_ff_quota_to_bytes() {
+    local up val mult
+    up=$(printf '%s' "$1" | tr -d ' ' | tr 'a-z' 'A-Z')
+    [[ -z "$up" || "$up" == "0" ]] && { echo 0; return; }
+    case "$up" in
+        *GB) mult=1073741824 ;;
+        *MB) mult=1048576 ;;
+        *KB) mult=1024 ;;
+        *)   mult=1073741824 ;;
+    esac
+    val="${up%GB}"; val="${val%MB}"; val="${val%KB}"
+    if ! [[ "$val" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then echo 0; return; fi
+    awk "BEGIN { printf \"%.0f\", $val * $mult }"
+}
+
+# Human label for a stored quota field ("Unlimited" when 0/empty).
+_ff_quota_label() {
+    local c; c=$(_ff_quota_canonical "$1")
+    [[ "$c" == "0" ]] && printf 'Unlimited' || printf '%s' "$c"
+}
+
 is_VPS_superScript_orphan_user() {
     local username="$1"
     local passwd_line system_user _ uid _ home shell
@@ -1230,7 +1299,7 @@ setup_limiter_service() {
     # Combined limiter + bandwidth monitoring
     cat > "$LIMITER_SCRIPT" << 'EOF'
 #!/bin/bash
-# VPS_superScript limiter version 2026-06-26.4
+# VPS_superScript limiter version 2026-10-11.5
 DB_FILE="/etc/VPS_superScript/users.db"
 BW_DIR="/etc/VPS_superScript/bandwidth"
 PID_DIR="$BW_DIR/pidtrack"
@@ -1246,6 +1315,34 @@ BADVPN_LISTEN_PORT="7300"
 
 mkdir -p "$BW_DIR" "$PID_DIR"
 shopt -s nullglob
+
+# Convert a stored quota field into bytes. Handles the canonical forms the menu
+# now writes ("2GB", "500MB"), legacy bare numbers (=GB) and "0"/empty
+# (=unlimited). Kept inline because this daemon runs with no menu functions.
+ff_quota_to_bytes() {
+    local up val mult
+    up=$(printf '%s' "$1" | tr -d ' ' | tr 'a-z' 'A-Z')
+    [[ -z "$up" || "$up" == "0" ]] && { echo 0; return; }
+    case "$up" in
+        *GB) mult=1073741824 ;;
+        *MB) mult=1048576 ;;
+        *KB) mult=1024 ;;
+        *)   mult=1073741824 ;;
+    esac
+    val="${up%GB}"; val="${val%MB}"; val="${val%KB}"
+    if ! [[ "$val" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then echo 0; return; fi
+    awk "BEGIN { printf \"%.0f\", $val * $mult }"
+}
+
+# Human-readable byte size for banners ("1.50 GB", "512.00 MB").
+ff_bytes_human() {
+    local b=${1:-0}
+    [[ "$b" =~ ^[0-9]+$ ]] || b=0
+    if   (( b >= 1073741824 )); then awk "BEGIN { printf \"%.2f GB\", $b/1073741824 }"
+    elif (( b >= 1048576 ));    then awk "BEGIN { printf \"%.2f MB\", $b/1048576 }"
+    elif (( b >= 1024 ));       then awk "BEGIN { printf \"%.0f KB\", $b/1024 }"
+    else printf '%d B' "$b"; fi
+}
 
 # Immediately drop / restore all traffic owned by a user's UID so auto-locks
 # (expiry, quota, connection-limit) cut live SSH and SSH-tunnel sessions at once.
@@ -1408,25 +1505,38 @@ while true; do
             user_locked=true
         fi
 
-        # Precise trial expiry: enforced from a timestamp file so sub-day
-        # trials end on time even if the scheduled 'at' cleanup was lost.
+        # Precise expiry: a per-user epoch timestamp (.ts) enforces sub-day
+        # durations exactly (and any duration even if 'at' was lost). Trials are
+        # deleted when they end; normal accounts are locked like a date expiry.
         trial_ts_file="$TRIAL_DIR/${user}.ts"
-        if [[ "$_extra" == "trial" && -f "$trial_ts_file" ]]; then
+        if [[ -f "$trial_ts_file" ]]; then
             trial_expiry=0
             read -r trial_expiry < "$trial_ts_file" || trial_expiry=0
             if [[ "$trial_expiry" =~ ^[0-9]+$ ]] && (( trial_expiry > 0 && trial_expiry <= current_ts )); then
-                usermod -L "$user" &>/dev/null
-                ff_block_uid "$user"
-                killall -u "$user" -9 &>/dev/null
-                # Kill live ZiVPN session before deleting the user.
-                [[ "$(ff_zivpn_lock_user "$user" "$pass")" == "changed" ]] && udp_blip_zivpn=true
-                udp_blip_needed=true
-                ff_unblock_uid "$user"
-                userdel -r "$user" &>/dev/null
-                sed -i "/^${user}:/d" "$DB_FILE" 2>/dev/null
-                rm -f "$BW_DIR/${user}.usage" "$trial_ts_file"
-                rm -rf "$PID_DIR/${user}" 2>/dev/null
-                continue
+                if [[ "$_extra" == "trial" ]]; then
+                    usermod -L "$user" &>/dev/null
+                    ff_block_uid "$user"
+                    killall -u "$user" -9 &>/dev/null
+                    # Kill live ZiVPN session before deleting the user.
+                    [[ "$(ff_zivpn_lock_user "$user" "$pass")" == "changed" ]] && udp_blip_zivpn=true
+                    udp_blip_needed=true
+                    ff_unblock_uid "$user"
+                    userdel -r "$user" &>/dev/null
+                    sed -i "/^${user}:/d" "$DB_FILE" 2>/dev/null
+                    rm -f "$BW_DIR/${user}.usage" "$trial_ts_file"
+                    rm -rf "$PID_DIR/${user}" 2>/dev/null
+                    continue
+                else
+                    if ! $user_locked; then
+                        usermod -L "$user" &>/dev/null
+                        ff_block_uid "$user"
+                        killall -u "$user" -9 &>/dev/null
+                        udp_blip_needed=true
+                        [[ "$(ff_zivpn_lock_user "$user" "$pass")" == "changed" ]] && udp_blip_zivpn=true
+                        locked_users["$user"]=1
+                    fi
+                    continue
+                fi
             fi
         fi
 
@@ -1480,23 +1590,17 @@ while true; do
             fi
 
             bw_info="Unlimited"
-            if [[ "$bandwidth_gb" != "0" && -n "$bandwidth_gb" ]]; then
+            quota_b=$(ff_quota_to_bytes "$bandwidth_gb")
+            if (( quota_b > 0 )); then
                 usagefile="$BW_DIR/${user}.usage"
                 accum_disp=0
                 if [[ -f "$usagefile" ]]; then
                     read -r accum_disp < "$usagefile"
                     [[ "$accum_disp" =~ ^[0-9]+$ ]] || accum_disp=0
                 fi
-                used_gb_int=$((accum_disp / 1073741824))
-                used_gb_frac=$(( (accum_disp % 1073741824) * 100 / 1073741824 ))
-                printf -v used_gb "%d.%02d" "$used_gb_int" "$used_gb_frac"
-                quota_b=$(( ${bandwidth_gb%%.*} * 1073741824 ))
                 remain_b=$(( quota_b - accum_disp ))
                 (( remain_b < 0 )) && remain_b=0
-                remain_gb_int=$((remain_b / 1073741824))
-                remain_gb_frac=$(( (remain_b % 1073741824) * 100 / 1073741824 ))
-                printf -v remain_gb "%d.%02d" "$remain_gb_int" "$remain_gb_frac"
-                bw_info="${used_gb}/${bandwidth_gb} GB used | ${remain_gb} GB left"
+                bw_info="$(ff_bytes_human "$accum_disp") / $(ff_bytes_human "$quota_b") used | $(ff_bytes_human "$remain_b") left"
             fi
 
             banner_content="<br><font color=\"yellow\"><b>      ✨ ACCOUNT STATUS ✨      </b></font><br><br>"
@@ -1507,7 +1611,8 @@ while true; do
             write_banner_if_changed "$user" "$banner_content"
         fi
 
-        [[ -z "$bandwidth_gb" || "$bandwidth_gb" == "0" ]] && continue
+        quota_bytes=$(ff_quota_to_bytes "$bandwidth_gb")
+        (( quota_bytes > 0 )) || continue
 
         usagefile="$BW_DIR/${user}.usage"
         accumulated=0
@@ -1561,7 +1666,6 @@ while true; do
         new_total=$((accumulated + delta_total))
         printf "%s\n" "$new_total" > "$usagefile"
 
-        quota_bytes=$(( ${bandwidth_gb%%.*} * 1073741824 ))
         if [[ "$quota_bytes" =~ ^[0-9]+$ ]] && (( new_total >= quota_bytes )); then
             if ! $user_locked; then
                 usermod -L "$user" &>/dev/null
@@ -1683,7 +1787,7 @@ _ff_zivpn_add_pass() {
 }
 
 sync_runtime_components_if_needed() {
-    local limiter_marker="# VPS_superScript limiter version 2026-06-26.4"
+    local limiter_marker="# VPS_superScript limiter version 2026-10-11.5"
     # Safety net: guarantee core directories and the user group exist even when
     # the menu is launched directly (e.g. `bash menu.sh` from a git clone)
     # without the one-time `--install-setup` having been run first.
@@ -2162,15 +2266,17 @@ create_user() {
             break
         fi
     done
-    read -p "🗓️ Enter account duration (in days) [30]: " days
-    days=${days:-30}
-    if ! [[ "$days" =~ ^[0-9]+$ ]]; then echo -e "\n${C_RED}❌ Invalid number.${C_RESET}"; return; fi
+    read -p "🗓️ Enter account duration (e.g. 30m, 2h, 1d, 2d4h30m) [30d]: " duration_input
+    duration_input=${duration_input:-30d}
+    local duration_secs; duration_secs=$(_ff_dur_to_seconds "$duration_input")
+    if [[ "$duration_secs" -le 0 ]]; then echo -e "\n${C_RED}❌ Invalid duration. Use e.g. 30m, 2h, 1d, 2d4h30m.${C_RESET}"; return; fi
     read -p "📶 Enter simultaneous connection limit [1]: " limit
     limit=${limit:-1}
     if ! [[ "$limit" =~ ^[0-9]+$ ]]; then echo -e "\n${C_RED}❌ Invalid number.${C_RESET}"; return; fi
-    read -p "📦 Enter bandwidth limit in GB (0 = unlimited) [0]: " bandwidth_gb
-    bandwidth_gb=${bandwidth_gb:-0}
-    if ! [[ "$bandwidth_gb" =~ ^[0-9]+\.?[0-9]*$ ]]; then echo -e "\n${C_RED}❌ Invalid number.${C_RESET}"; return; fi
+    read -p "📦 Enter bandwidth quota (e.g. 500MB, 1GB, 10GB; 0 = unlimited) [0]: " quota_input
+    quota_input=${quota_input:-0}
+    if ! _ff_quota_valid "$quota_input"; then echo -e "\n${C_RED}❌ Invalid quota. Use e.g. 500MB, 1GB, 10GB.${C_RESET}"; return; fi
+    local bandwidth_gb; bandwidth_gb=$(_ff_quota_canonical "$quota_input")
     # App type selector
     local app="http"
     echo -e "\n${C_DIM}Select the target application for this account:${C_RESET}"
@@ -2210,8 +2316,13 @@ create_user() {
     # NOTE: per-user UDP port ranges are intentionally not assigned. The NAT layer
     # forwards the whole UDP range to the relays globally, so every account works
     # without carving out per-user ranges.
-    local expire_date
-    expire_date=$(date -d "+$days days" +%Y-%m-%d)
+    # chage only accepts a date; round UP to the calendar date of the true
+    # cutoff so the shadow expiry can never fire early. The limiter's precise
+    # .ts timestamp (written below) enforces the exact sub-day moment.
+    local expire_date expiry_epoch
+    expire_date=$(date -d "+${duration_secs} seconds" +%Y-%m-%d)
+    [[ "$expire_date" == "$(date +%Y-%m-%d)" ]] && expire_date=$(date -d "tomorrow" +%Y-%m-%d)
+    expiry_epoch=$(( $(date +%s) + duration_secs ))
     ensure_VPS_superScript_system_group
     if [[ "$adopt_existing" == "true" ]]; then
         usermod -s /usr/sbin/nologin "$username" &>/dev/null
@@ -2231,6 +2342,10 @@ create_user() {
     # Fields: user:pass:expiry:limit:bw:marker:hwid:strict
     # 6th field is the account marker: empty = normal account, "trial" = auto-expiring trial.
     echo "$username:$password:$expire_date:$limit:$bandwidth_gb::$hwid:$strict:$app" >> "$DB_FILE"
+    # Precise expiry timestamp so sub-day durations end on time; the limiter
+    # locks a normal account (and deletes a trial) when this epoch passes.
+    mkdir -p "$TRIAL_EXPIRY_DIR"
+    printf '%s\n' "$expiry_epoch" > "$TRIAL_EXPIRY_DIR/${username}.ts"
     hwid_sync_allowed_db
 
     if [[ "$app" == "zivpn" ]]; then
@@ -2346,8 +2461,7 @@ HYCEOF
         echo -e "\n${C_GREEN}✅ Hysteria2 config generated: ${C_YELLOW}$_hy_file${C_RESET}"
     fi
 
-    local bw_display="Unlimited"
-    if [[ "$bandwidth_gb" != "0" ]]; then bw_display="${bandwidth_gb} GB"; fi
+    local bw_display; bw_display=$(_ff_quota_label "$bandwidth_gb")
 
     clear; show_banner
     if [[ "$adopt_existing" == "true" ]]; then
@@ -2416,7 +2530,7 @@ view_user_details() {
     [[ -z "$cur_strict" ]] && cur_strict="0"
     [[ -z "$cur_app" ]] && cur_app="http"
 
-    local bw_display="Unlimited"; [[ "$cur_bw" != "0" ]] && bw_display="${cur_bw} GB"
+    local bw_display; bw_display=$(_ff_quota_label "$cur_bw")
 
     local bw_used_display="N/A"
     if [[ -f "$BANDWIDTH_DIR/${username}.usage" ]]; then
@@ -2480,7 +2594,7 @@ edit_user() {
         [[ -z "$cur_bw" ]] && cur_bw="0"
         [[ -z "$cur_strict" ]] && cur_strict="0"
         [[ -z "$cur_app" ]] && cur_app="http"
-        local cur_bw_display="Unlimited"; [[ "$cur_bw" != "0" ]] && cur_bw_display="${cur_bw} GB"
+        local cur_bw_display; cur_bw_display=$(_ff_quota_label "$cur_bw")
         
         # Show bandwidth usage
         local bw_used_display="N/A"
@@ -2565,15 +2679,16 @@ edit_user() {
                     db_set_user "$username" "$cur_pass" "$cur_expiry" "$new_limit" "$cur_bw" "$cur_marker" "$cur_hwid" "$cur_strict" "$cur_app"
                     echo -e "\n${C_GREEN}✅ Connection limit for '$username' set to ${C_YELLOW}$new_limit${C_RESET}."
                else echo -e "\n${C_RED}❌ Invalid limit.${C_RESET}"; fi ;;
-            4) read -p "Enter new bandwidth limit in GB (0 = unlimited): " new_bw
-               if [[ "$new_bw" =~ ^[0-9]+\.?[0-9]*$ ]]; then
+            4) read -p "Enter new bandwidth quota (e.g. 500MB, 1GB; 0 = unlimited): " quota_input
+               local new_bw; new_bw=$(_ff_quota_canonical "$quota_input")
+               if _ff_quota_valid "$quota_input"; then
                     db_set_user "$username" "$cur_pass" "$cur_expiry" "$cur_limit" "$new_bw" "$cur_marker" "$cur_hwid" "$cur_strict" "$cur_app"
-                    local bw_msg="Unlimited"; [[ "$new_bw" != "0" ]] && bw_msg="${new_bw} GB"
+                    local bw_msg; bw_msg=$(_ff_quota_label "$new_bw")
                    echo -e "\n${C_GREEN}✅ Bandwidth limit for '$username' set to ${C_YELLOW}$bw_msg${C_RESET}."
                    # Unlock user if they were locked due to bandwidth
                    if [[ "$new_bw" == "0" ]] || [[ -f "$BANDWIDTH_DIR/${username}.usage" ]]; then
                        local used_bytes; used_bytes=$(cat "$BANDWIDTH_DIR/${username}.usage" 2>/dev/null || echo 0)
-                       local new_quota_bytes; new_quota_bytes=$(awk "BEGIN {printf \"%.0f\", $new_bw * 1073741824}")
+                       local new_quota_bytes; new_quota_bytes=$(_ff_quota_to_bytes "$new_bw")
                        if [[ "$new_bw" == "0" ]] || [[ "$used_bytes" -lt "$new_quota_bytes" ]]; then
                            _ff_restore_user_all_protocols "$username"
                        fi
@@ -3110,11 +3225,11 @@ unlock_user() {
         if [[ -n "$bw" && "$bw" != "0" ]]; then
             local usagefile="$BANDWIDTH_DIR/${u}.usage" used=0 quota
             if [[ -f "$usagefile" ]]; then read -r used < "$usagefile" 2>/dev/null; [[ "$used" =~ ^[0-9]+$ ]] || used=0; fi
-            quota=$(( ${bw%%.*} * 1073741824 ))
+            quota=$(_ff_quota_to_bytes "$bw")
             if [[ "$quota" =~ ^[0-9]+$ ]] && (( quota > 0 && used >= quota )); then
                 echo "0" > "$usagefile"
                 rm -f "$BANDWIDTH_DIR/pidtrack/${u}__"*.last 2>/dev/null
-                quota_note="    ${C_DIM}↳ bandwidth usage was over the ${bw}GB quota — reset to 0 so the unlock holds.${C_RESET}"
+                quota_note="    ${C_DIM}↳ bandwidth usage was over the ${bw} quota — reset to 0 so the unlock holds.${C_RESET}"
             fi
         fi
         # (b) Expiry: a shadow unlock cannot survive a past expiry date — the
@@ -3178,14 +3293,24 @@ _ff_days_left_color() {
 
 list_users() {
     clear; show_banner
+
+    # Top decorative header box
+    echo -e "${C_BOLD}${C_PURPLE}╔═══════════════════════════════════════════${C_RESET}"
+    echo -e "  ${C_PURPLE}📋  MANAGED USERS  ${C_RESET}${C_BOLD}═══════════════${C_RESET}"
+    echo -e "${C_BOLD}${C_PURPLE}╚══════════════════════════════════════════${C_RESET}"
+
+    # Original separator
+    echo -e "${C_CYAN}=====================================================================================================${C_RESET}"
+
+    # Column headers row
+    printf "${C_BOLD}${C_WHITE}%-18s ${C_RESET}| ${C_YELLOW}%-12s ${C_RESET}| ${C_ORANGE}%-10s ${C_RESET}| ${C_GREEN}%-10s ${C_RESET}\n" \
+            "USERNAME" "STATUS" "HWID" "EXPIRES"
+    echo -e "${C_CYAN}-----------------------------------------------------------------------------------------------------${C_RESET}"
+
     if [[ ! -s "$DB_FILE" ]]; then
         echo -e "\n${C_YELLOW}ℹ️ No users are currently being managed.${C_RESET}"
         return
     fi
-    echo -e "${C_BOLD}${C_PURPLE}--- 📋 Managed Users ---${C_RESET}"
-    echo -e "${C_CYAN}=====================================================================================================${C_RESET}"
-    printf "${C_BOLD}${C_WHITE}%-18s | %-12s | %-10s | %-10s | %-15s | %-20s${C_RESET}\n" "USERNAME" "EXPIRES" "DAYS LEFT" "CONNS" "BANDWIDTH" "STATUS"
-    echo -e "${C_CYAN}-----------------------------------------------------------------------------------------------------${C_RESET}"
 
     local current_ts
     printf -v current_ts '%(%s)T' -1
@@ -3208,7 +3333,11 @@ list_users() {
     fi
     refresh_ssh_session_cache
 
+    local total_users=0 active_count=0 quota_exceeded=0 expired_count=0 locked_hwid=0 paused_count=0
+
     while IFS=: read -r user pass expiry limit bandwidth_gb _extra; do
+        ((total_users++))
+
         local online_count="${SSH_SESSION_COUNTS[$user]:-0}"
         local connection_string="$online_count / $limit"
         local plain_status="Active"
@@ -3216,32 +3345,76 @@ list_users() {
         local quota_exceeded=false
 
         [[ -z "$bandwidth_gb" ]] && bandwidth_gb="0"
-        local bw_string="Unlimited"
-        if [[ "$bandwidth_gb" != "0" ]]; then
+        local bw_string; bw_string=$(_ff_quota_label "$bandwidth_gb")
+        local quota_bytes; quota_bytes=$(_ff_quota_to_bytes "$bandwidth_gb")
+        if (( quota_bytes > 0 )); then
             local used_bytes=0
             if [[ -f "$BANDWIDTH_DIR/${user}.usage" ]]; then
                 read -r used_bytes < "$BANDWIDTH_DIR/${user}.usage" 2>/dev/null || used_bytes=0
                 [[ "$used_bytes" =~ ^[0-9]+$ ]] || used_bytes=0
             fi
-            local used_gb
-            used_gb=$(awk "BEGIN {printf \"%.1f\", $used_bytes / 1073741824}")
-            bw_string="${used_gb}/${bandwidth_gb}GB"
-            local quota_bytes
-            quota_bytes=$(awk "BEGIN {printf \"%.0f\", $bandwidth_gb * 1073741824}")
-            if [[ "$quota_bytes" =~ ^[0-9]+$ ]] && (( used_bytes >= quota_bytes )); then
+            local used_h
+            used_h=$(awk "BEGIN {b=$used_bytes; if (b>=1073741824) printf \"%.1f GB\", b/1073741824; else if (b>=1048576) printf \"%.1f MB\", b/1048576; else printf \"%.0f KB\", b/1024}")
+            bw_string="${used_h}/${bandwidth_gb}"
+            if (( used_bytes >= quota_bytes )); then
                 quota_exceeded=true
             fi
         fi
 
+        # HWID Status (emojis only)
+        if [[ -n "${locked_user_lookup[$user]+x}" ]]; then
+            hwid_emoji="🔒"
+        else
+            hwid_emoji="🔓"
+        fi
+
+        # Pause Status
+        local pause_display="--"
+        if [ -n "$pass" ] && [ -f "$PAUSE_DB" ]; then
+            pause_ts=$(grep "^${pass}|" "$PAUSE_DB" 2>/dev/null | cut -d'|' -f2)
+            if [ -n "$pause_ts" ] && [ "$(date +%s)" -lt "$pause_ts" ]; then
+                seconds=$((pause_ts - $(date +%s)))
+                if [ $seconds -ge 3600 ]; then
+                    pause_human="$((seconds / 3600))h $((seconds % 3600 / 60))m"
+                else
+                    pause_human="$((seconds / 60))m"
+                fi
+                pause_display="⏱ ${pause_human}"
+            else
+                pause_display="✅ Active"
+            fi
+        else
+            pause_display="⏱ --"
+        fi
+
+        # Expires format (trial duration)
+        if [[ -z "$expiry" || "$expiry" == "Never" ]]; then
+            expires_display="N/A"
+        elif [[ "$expiry" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+            expiry_ts=$(date -d "$expiry 23:59:59" +%s 2>/dev/null || echo 0)
+            if [[ "$expiry_ts" =~ ^[0-9]+$ ]] && (( expiry_ts > current_ts )); then
+                remaining=$((expiry_ts - current_ts))
+                expires_display=$(expiry_human "$remaining")
+            else
+                expires_display="0d left"
+            fi
+        else
+            # Already a duration string like "2d4h30m"
+            expires_display="${expiry} left"
+        fi
+
+        # Status coloring
         if [[ -z "${system_user_lookup[$user]+x}" ]]; then
             plain_status="Not Found"
             status="${C_RED}Not Found${C_RESET}"
+            ((expired_count++))
         elif [[ -n "$expiry" && "$expiry" != "Never" ]]; then
-            local expiry_ts
+            expiry_ts
             expiry_ts=$(date -d "$expiry" +%s 2>/dev/null || echo 0)
             if [[ "$expiry_ts" =~ ^[0-9]+$ ]] && (( expiry_ts > 0 && expiry_ts < current_ts )); then
                 plain_status="Expired"
                 status="${C_RED}🗓️ Expired${C_RESET}"
+                ((expired_count++))
             fi
         fi
 
@@ -3258,6 +3431,8 @@ list_users() {
             status="${C_YELLOW}🔒 Locked${C_RESET}"
         fi
 
+        ((active_count++))
+
         local line_color="$C_WHITE"
         case "$plain_status" in
             "Active") line_color="$C_GREEN" ;;
@@ -3271,18 +3446,28 @@ list_users() {
         local days_left_disp; days_left_disp=$(_ff_days_left_str "$expiry" "$current_ts")
         local days_left_color; days_left_color=$(_ff_days_left_color "$days_left_disp")
 
-        printf "${line_color}%-18s ${C_RESET}| ${C_YELLOW}%-12s ${C_RESET}| ${days_left_color}%-10s ${C_RESET}| ${C_CYAN}%-10s ${C_RESET}| ${C_ORANGE}%-15s ${C_RESET}| %-20s\n" "$user" "$expiry" "$days_left_disp" "$connection_string" "$bw_string" "$status"
+        printf "${line_color}%-18s ${C_RESET}| ${C_YELLOW}%-12s ${C_RESET}| ${C_ORANGE}%s${C_RESET} ${C_RESET}| ${C_GREEN}%-10s ${C_RESET}\n" \
+                "$user" "$status" "$hwid_emoji" "$expires_display"
     done < <(sort "$DB_FILE")
+
+    # Footer stats bar
+    echo -e "${C_BOLD}${C_PURPLE}╔═══════════════════════════════════════════${C_RESET}"
+    echo -e "${C_BOLD}${C_CYAN}║  📊  Total: ${total_users} users  | Active: ${active_count} | Quota Exceeded: ${quota_exceeded} | Expired: ${expired_count}${C_RESET}${C_BOLD}║${C_RESET}"
+    echo -e "${C_BOLD}${C_PURPLE}╚══════════════════════════════════════════${C_RESET}"
+
     echo -e "${C_CYAN}=====================================================================================================${C_RESET}\n"
 }
 
 renew_user() {
     _select_multi_user_interface "--- 🔄 Renew Users ---"
     if [[ ${#SELECTED_USERS[@]} -eq 0 || "${SELECTED_USERS[0]}" == "NO_USERS" ]]; then return; fi
-    read -p "👉 Enter number of days to extend the account(s): " days; if ! [[ "$days" =~ ^[0-9]+$ ]]; then echo -e "\n${C_RED}❌ Invalid number.${C_RESET}"; return; fi
-    local new_expire_date; new_expire_date=$(date -d "+$days days" +%Y-%m-%d)
+    read -p "👉 Enter duration to extend the account(s) (e.g. 30d, 7d, 2h, 2d4h30m): " duration_input
+    local duration_secs; duration_secs=$(_ff_dur_to_seconds "$duration_input")
+    if [[ "$duration_secs" -le 0 ]]; then echo -e "\n${C_RED}❌ Invalid duration. Use e.g. 30d, 7d, 2h.${C_RESET}"; return; fi
+    local new_expire_date; new_expire_date=$(date -d "+${duration_secs} seconds" +%Y-%m-%d)
+    [[ "$new_expire_date" == "$(date +%Y-%m-%d)" ]] && new_expire_date=$(date -d "tomorrow" +%Y-%m-%d)
     
-    echo -e "\n${C_BLUE}🔄 Renewing selected users for $days days...${C_RESET}"
+    echo -e "\n${C_BLUE}🔄 Renewing selected users for $duration_input...${C_RESET}"
     for u in "${SELECTED_USERS[@]}"; do
         chage -E "$new_expire_date" "$u"
         local line pass _expiry limit bw marker hwid strict app
@@ -3291,10 +3476,11 @@ renew_user() {
         [[ -z "$bw" ]] && bw="0"
         [[ -z "$strict" ]] && strict="0"
         [[ -z "$app" ]] && app="http"
-        # Renewing for a fixed number of days promotes a trial to a normal
-        # dated account: drop the trial marker and precise-expiry timestamp.
-        rm -f "$TRIAL_EXPIRY_DIR/${u}.ts"
+        # Renewing promotes a trial to a normal dated account (marker cleared) and
+        # rewrites the precise-expiry timestamp for the new duration.
         db_set_user "$u" "$pass" "$new_expire_date" "$limit" "$bw" "" "$hwid" "$strict" "$app"
+        mkdir -p "$TRIAL_EXPIRY_DIR"
+        printf '%s\n' "$(( $(date +%s) + duration_secs ))" > "$TRIAL_EXPIRY_DIR/${u}.ts"
         # Restore access immediately in case the account was auto-locked/blocked
         # for expiry before this renewal (SSH + UDP, incl. ZiVPN password).
         _ff_restore_user_all_protocols "$u"
@@ -3468,7 +3654,7 @@ restore_user_data() {
         echo " - Setting expiration to $expiry..."
         chage -E "$expiry" "$user"
         [[ -z "$bandwidth_gb" ]] && bandwidth_gb="0"
-        local bw_note="Unlimited"; [[ "$bandwidth_gb" != "0" ]] && bw_note="${bandwidth_gb} GB"
+        local bw_note; bw_note=$(_ff_quota_label "$bandwidth_gb")
         echo " - Connection limit ${limit:-1}, bandwidth ${bw_note} (enforced by the limiter service)"
     done < "$DB_FILE"
 
@@ -4091,16 +4277,10 @@ backup_edge_configs() {
     if [ -f "$NGINX_CONFIG_FILE" ] && [ ! -f "${NGINX_CONFIG_FILE}.bak.VPS_superScript" ]; then
         cp "$NGINX_CONFIG_FILE" "${NGINX_CONFIG_FILE}.bak.VPS_superScript" 2>/dev/null
     fi
-    if [ -f "$HAPROXY_CONFIG" ] && [ ! -f "${HAPROXY_CONFIG}.bak.VPS_superScript" ]; then
-        cp "$HAPROXY_CONFIG" "${HAPROXY_CONFIG}.bak.VPS_superScript" 2>/dev/null
-    fi
 }
 
 ensure_edge_stack_packages() {
     local missing_packages=()
-    if ! command -v haproxy &> /dev/null || [ ! -f "/etc/haproxy/haproxy.cfg" ]; then
-        missing_packages+=("haproxy")
-    fi
     if ! command -v nginx &> /dev/null || [ ! -f "/etc/nginx/nginx.conf" ]; then
         missing_packages+=("nginx")
     fi
@@ -4111,7 +4291,7 @@ ensure_edge_stack_packages() {
         if ! ff_pkg_install "${missing_packages[@]}"; then
             echo -e "${C_YELLOW}⚠️ Package installation failed. Attempting to fix broken configurations...${C_RESET}"
             if command -v apt-get &>/dev/null; then
-                apt-get purge -y nginx nginx-common haproxy >/dev/null 2>&1
+                apt-get purge -y nginx nginx-common >/dev/null 2>&1
             fi
             if ! ff_pkg_install "${missing_packages[@]}"; then
                 echo -e "${C_RED}❌ Failed to install the required packages.${C_RESET}"
@@ -4168,25 +4348,21 @@ _install_certbot() {
 obtain_certbot_edge_cert() {
     local domain_name="$1"
     local email="$2"
-    local restart_haproxy=0
-    local restart_nginx=0
 
     mkdir -p "$SSL_CERT_DIR"
     _install_certbot || return 1
 
-    if systemctl is-active --quiet haproxy; then restart_haproxy=1; fi
     if systemctl is-active --quiet nginx; then restart_nginx=1; fi
 
-    echo -e "\n${C_BLUE}🛑 Stopping HAProxy and Nginx for Certbot validation...${C_RESET}"
-    systemctl stop haproxy >/dev/null 2>&1
+    echo -e "\n${C_BLUE}🛑 Stopping Nginx for Certbot validation...${C_RESET}"
     systemctl stop nginx >/dev/null 2>&1
     sleep 2
 
     check_and_free_ports "$EDGE_PUBLIC_HTTP_PORT" "$EDGE_PUBLIC_TLS_PORT" || {
         [[ "$restart_nginx" -eq 1 ]] && systemctl start nginx >/dev/null 2>&1
-        [[ "$restart_haproxy" -eq 1 ]] && systemctl start haproxy >/dev/null 2>&1
         return 1
     }
+}
 
     echo -e "\n${C_BLUE}🚀 Requesting a Certbot certificate for ${C_YELLOW}$domain_name${C_RESET}"
     certbot certonly --standalone -d "$domain_name" --non-interactive --agree-tos -m "$email"
@@ -6757,13 +6933,6 @@ show_banner() {
     if systemctl is-active --quiet nginx; then
         svc_lbl+=("Nginx Int.:"); svc_val+=("${NGINX_INTERNAL_HTTP_PORT:-8880}, ${NGINX_INTERNAL_TLS_PORT:-8443}")
     fi
-    if systemctl is-active --quiet falconproxy; then
-        local fp_ports="8080"
-        if [ -f "$FALCONPROXY_CONFIG_FILE" ]; then
-            fp_ports=$(grep -oP '^PORTS="\K[^"]*' "$FALCONPROXY_CONFIG_FILE" 2>/dev/null || echo "8080")
-        fi
-        svc_lbl+=("FalconProxy:"); svc_val+=("$fp_ports")
-    fi
     if systemctl is-active --quiet dropbear; then
         svc_lbl+=("Dropbear:"); svc_val+=("${DROPBEAR_PORTS}")
     fi
@@ -6782,14 +6951,8 @@ show_banner() {
     if systemctl is-active --quiet danted; then
         svc_lbl+=("Socks5:"); svc_val+=("${SOCKS5_PORT}")
     fi
-    if systemctl is-active --quiet squid; then
-        svc_lbl+=("Squid:"); svc_val+=("${SQUID_PORT}")
-    fi
     if systemctl is-active --quiet stunnel4; then
         svc_lbl+=("Stunnel:"); svc_val+=("${STUNNEL_PORT}")
-    fi
-    if systemctl is-active --quiet argo-tunnel; then
-        svc_lbl+=("Argo:"); svc_val+=("${ARGO_TUNNEL_HTTP}, ${ARGO_TUNNEL_HTTPS}")
     fi
     if [[ -f /etc/systemd/system/rest-api.service ]] && systemctl is-active --quiet rest-api; then
         svc_lbl+=("Rest API:"); svc_val+=("${REST_API_PORT}")
@@ -7177,38 +7340,41 @@ create_trial_account() {
     fi
     
     echo -e "\n${C_CYAN}Select trial duration:${C_RESET}\n"
-    printf "  ${C_GREEN}[ 1]${C_RESET} ⏱️  1 Hour\n"
-    printf "  ${C_GREEN}[ 2]${C_RESET} ⏱️  2 Hours\n"
-    printf "  ${C_GREEN}[ 3]${C_RESET} ⏱️  3 Hours\n"
-    printf "  ${C_GREEN}[ 4]${C_RESET} ⏱️  6 Hours\n"
-    printf "  ${C_GREEN}[ 5]${C_RESET} ⏱️  12 Hours\n"
-    printf "  ${C_GREEN}[ 6]${C_RESET} 📅  1 Day\n"
-    printf "  ${C_GREEN}[ 7]${C_RESET} 📅  3 Days\n"
-    printf "  ${C_GREEN}[ 8]${C_RESET} ⚙️  Custom (enter hours)\n"
+    printf "  ${C_GREEN}[ 1]${C_RESET} ⏱️  30 Minutes\n"
+    printf "  ${C_GREEN}[ 2]${C_RESET} ⏱️  1 Hour\n"
+    printf "  ${C_GREEN}[ 3]${C_RESET} ⏱️  2 Hours\n"
+    printf "  ${C_GREEN}[ 4]${C_RESET} ⏱️  3 Hours\n"
+    printf "  ${C_GREEN}[ 5]${C_RESET} ⏱️  6 Hours\n"
+    printf "  ${C_GREEN}[ 6]${C_RESET} ⏱️  12 Hours\n"
+    printf "  ${C_GREEN}[ 7]${C_RESET} 📅  1 Day\n"
+    printf "  ${C_GREEN}[ 8]${C_RESET} 📅  3 Days\n"
+    printf "  ${C_GREEN}[ 9]${C_RESET} ⚙️  Custom (e.g. 30m, 2h, 2d4h30m)\n"
     echo -e "\n  ${C_RED}[ 0]${C_RESET} ↩️ Cancel"
     echo
     read -p "👉 Select duration: " dur_choice
-    
-    local duration_hours=0
+
+    local duration_secs=0
     local duration_label=""
     case $dur_choice in
-        1) duration_hours=1;   duration_label="1 Hour" ;;
-        2) duration_hours=2;   duration_label="2 Hours" ;;
-        3) duration_hours=3;   duration_label="3 Hours" ;;
-        4) duration_hours=6;   duration_label="6 Hours" ;;
-        5) duration_hours=12;  duration_label="12 Hours" ;;
-        6) duration_hours=24;  duration_label="1 Day" ;;
-        7) duration_hours=72;  duration_label="3 Days" ;;
-        8) read -p "👉 Enter custom duration in hours: " custom_hours
-           if ! [[ "$custom_hours" =~ ^[0-9]+$ ]] || [[ "$custom_hours" -lt 1 ]]; then
-               echo -e "\n${C_RED}❌ Invalid number of hours.${C_RESET}"; return
+        1) duration_secs=1800;   duration_label="30 Minutes" ;;
+        2) duration_secs=3600;   duration_label="1 Hour" ;;
+        3) duration_secs=7200;   duration_label="2 Hours" ;;
+        4) duration_secs=10800;  duration_label="3 Hours" ;;
+        5) duration_secs=21600;  duration_label="6 Hours" ;;
+        6) duration_secs=43200;  duration_label="12 Hours" ;;
+        7) duration_secs=86400;  duration_label="1 Day" ;;
+        8) duration_secs=259200; duration_label="3 Days" ;;
+        9) read -p "👉 Enter duration (e.g. 30m, 2h, 1d, 2d4h30m): " custom_dur
+           duration_secs=$(_ff_dur_to_seconds "$custom_dur")
+           if [[ "$duration_secs" -lt 60 ]]; then
+               echo -e "\n${C_RED}❌ Invalid duration (minimum 1 minute).${C_RESET}"; return
            fi
-           duration_hours=$custom_hours
-           duration_label="$custom_hours Hours"
+           duration_label="$custom_dur"
            ;;
         0) echo -e "\n${C_YELLOW}❌ Cancelled.${C_RESET}"; return ;;
         *) echo -e "\n${C_RED}❌ Invalid option.${C_RESET}"; return ;;
     esac
+    local duration_minutes=$(( (duration_secs + 59) / 60 ))
     
     # Username
     local rand_suffix=$(tr -dc 'a-z0-9' < /dev/urandom | head -c 5)
@@ -7230,10 +7396,11 @@ create_trial_account() {
     limit=${limit:-1}
     if ! [[ "$limit" =~ ^[0-9]+$ ]]; then echo -e "\n${C_RED}❌ Invalid number.${C_RESET}"; return; fi
     
-    # Bandwidth limit
-    read -p "📦 Bandwidth limit in GB (0 = unlimited) [0]: " bandwidth_gb
-    bandwidth_gb=${bandwidth_gb:-0}
-    if ! [[ "$bandwidth_gb" =~ ^[0-9]+\.?[0-9]*$ ]]; then echo -e "\n${C_RED}❌ Invalid number.${C_RESET}"; return; fi
+    # Bandwidth quota (OnePesewa-style: 100MB / 1GB / 10GB; 0 = unlimited).
+    read -p "📦 Data quota (e.g. 100MB, 1GB, 10GB; 0 = unlimited) [100MB]: " quota_input
+    quota_input=${quota_input:-100MB}
+    if ! _ff_quota_valid "$quota_input"; then echo -e "\n${C_RED}❌ Invalid quota. Use e.g. 100MB, 1GB.${C_RESET}"; return; fi
+    local bandwidth_gb; bandwidth_gb=$(_ff_quota_canonical "$quota_input")
     
     # App type selector
     local app="http"
@@ -7247,19 +7414,13 @@ create_trial_account() {
         *)                           app="http" ;;
     esac
 
-    # Calculate expiry
-    local expire_date
-    if [[ "$duration_hours" -ge 24 ]]; then
-        local days=$((duration_hours / 24))
-        expire_date=$(date -d "+$days days" +%Y-%m-%d)
-    else
-        # For sub-day durations, set expiry to tomorrow to be safe (at job does the real cleanup)
-        expire_date=$(date -d "+1 day" +%Y-%m-%d)
-    fi
-    local expiry_timestamp
-    expiry_timestamp=$(date -d "+${duration_hours} hours" '+%Y-%m-%d %H:%M:%S')
-    local expiry_epoch
-    expiry_epoch=$(date -d "+${duration_hours} hours" +%s)
+    # Calculate expiry from the exact duration in seconds. chage gets the
+    # rounded-up date; the precise .ts file drives the real cutoff.
+    local expire_date expiry_timestamp expiry_epoch
+    expire_date=$(date -d "+${duration_secs} seconds" +%Y-%m-%d)
+    [[ "$expire_date" == "$(date +%Y-%m-%d)" ]] && expire_date=$(date -d "tomorrow" +%Y-%m-%d)
+    expiry_timestamp=$(date -d "+${duration_secs} seconds" '+%Y-%m-%d %H:%M:%S')
+    expiry_epoch=$(( $(date +%s) + duration_secs ))
 
     # Create the system user
     ensure_VPS_superScript_system_group
@@ -7393,10 +7554,9 @@ HYCEOF
     printf '%s\n' "$expiry_epoch" > "$TRIAL_EXPIRY_DIR/${username}.ts"
 
     # Schedule auto-cleanup via 'at' (best-effort; limiter is the safety net)
-    echo "$TRIAL_CLEANUP_SCRIPT $username" | at now + ${duration_hours} hours 2>/dev/null
+    echo "$TRIAL_CLEANUP_SCRIPT $username" | at now + ${duration_minutes} minutes 2>/dev/null
     
-    local bw_display="Unlimited"
-    if [[ "$bandwidth_gb" != "0" ]]; then bw_display="${bandwidth_gb} GB"; fi
+    local bw_display; bw_display=$(_ff_quota_label "$bandwidth_gb")
     
     clear; show_banner
     echo -e "${C_GREEN}✅ Trial account created successfully!${C_RESET}\n"
@@ -7439,17 +7599,19 @@ bulk_create_users() {
         echo -e "\n${C_RED}❌ Invalid count (1-100).${C_RESET}"; return
     fi
     
-    read -p "🗓️ Account duration (in days) [30]: " days
-    days=${days:-30}
-    if ! [[ "$days" =~ ^[0-9]+$ ]]; then echo -e "\n${C_RED}❌ Invalid number.${C_RESET}"; return; fi
+    read -p "🗓️ Account duration (e.g. 30d, 7d, 2d4h30m) [30d]: " duration_input
+    duration_input=${duration_input:-30d}
+    local duration_secs; duration_secs=$(_ff_dur_to_seconds "$duration_input")
+    if [[ "$duration_secs" -le 0 ]]; then echo -e "\n${C_RED}❌ Invalid duration. Use e.g. 30d, 7d, 2d4h30m.${C_RESET}"; return; fi
     
     read -p "📶 Connection limit per user [1]: " limit
     limit=${limit:-1}
     if ! [[ "$limit" =~ ^[0-9]+$ ]]; then echo -e "\n${C_RED}❌ Invalid number.${C_RESET}"; return; fi
     
-    read -p "📦 Bandwidth limit in GB per user (0 = unlimited) [0]: " bandwidth_gb
-    bandwidth_gb=${bandwidth_gb:-0}
-    if ! [[ "$bandwidth_gb" =~ ^[0-9]+\.?[0-9]*$ ]]; then echo -e "\n${C_RED}❌ Invalid number.${C_RESET}"; return; fi
+    read -p "📦 Bandwidth quota per user (e.g. 500MB, 1GB; 0 = unlimited) [0]: " quota_input
+    quota_input=${quota_input:-0}
+    if ! _ff_quota_valid "$quota_input"; then echo -e "\n${C_RED}❌ Invalid quota. Use e.g. 500MB, 1GB.${C_RESET}"; return; fi
+    local bandwidth_gb; bandwidth_gb=$(_ff_quota_canonical "$quota_input")
 
     # App type for all bulk users
     local app="http"
@@ -7464,8 +7626,9 @@ bulk_create_users() {
     esac
 
     local expire_date
-    expire_date=$(date -d "+$days days" +%Y-%m-%d)
-    local bw_display="Unlimited"; [[ "$bandwidth_gb" != "0" ]] && bw_display="${bandwidth_gb} GB"
+    expire_date=$(date -d "+${duration_secs} seconds" +%Y-%m-%d)
+    [[ "$expire_date" == "$(date +%Y-%m-%d)" ]] && expire_date=$(date -d "tomorrow" +%Y-%m-%d)
+    local bw_display; bw_display=$(_ff_quota_label "$bandwidth_gb")
     ensure_VPS_superScript_system_group
     
     echo -e "\n${C_BLUE}⚙️ Creating $count users with prefix '${prefix}'...${C_RESET}\n"
@@ -7490,6 +7653,8 @@ bulk_create_users() {
         fi
         chage -E "$expire_date" "$username"
         echo "$username:$password:$expire_date:$limit:$bandwidth_gb:::0:$app" >> "$DB_FILE"
+        mkdir -p "$TRIAL_EXPIRY_DIR"
+        printf '%s\n' "$(( $(date +%s) + duration_secs ))" > "$TRIAL_EXPIRY_DIR/${username}.ts"
         if [[ "$app" == "zivpn" ]]; then
             _ff_zivpn_add_pass "$password"
         fi
@@ -10691,27 +10856,21 @@ rebuild_vps_menu() {
 # ═══════════════════════════════════════════════════════════
 port_manager_menu() {
     while true; do
-        clear; show_banner
-        echo -e "\n   ${C_TITLE}══════════════[ ${C_BOLD}🔌 PORT MANAGER ${C_RESET}${C_TITLE}]══════════════${C_RESET}"
+clear; show_banner
+        echo -e "\n   ${C_TITLE}═════════════[ ${C_BOLD}🔌 PORT MANAGER ${C_RESET}${C_TITLE}]═════════════${C_RESET}"
         local ports_list=(
             "SSH:22"
-            "HAProxy:${EDGE_PUBLIC_HTTP_PORT:-80}, ${EDGE_PUBLIC_TLS_PORT:-443}"
             "ZiVPN:${ZIVPN_LISTEN_PORT:-5667}"
             "UDP-Custom:${UDP_CUSTOM_LISTEN_PORT:-36712}"
             "BadVPN:${BADVPN_LISTEN_PORT:-7300}"
             "DNSTT:53"
             "Nginx Int:${NGINX_INTERNAL_HTTP_PORT:-8880}, ${NGINX_INTERNAL_TLS_PORT:-8443}"
-            "FalconProxy:$(systemctl is-active --quiet falconproxy 2>/dev/null && (grep -oP '^PORTS="\K[^"]*' $FALCONPROXY_CONFIG_FILE 2>/dev/null || echo 8080) || echo 'not installed')"
             "Dropbear:${DROPBEAR_PORTS}"
             "OpenVPN:${OPENVPN_TCP_PORT}, ${OPENVPN_UDP_PORT}, ${OPENVPN_SDNS_PORT}"
             "WireGuard:${WIREGUARD_PORT}"
             "Hysteria:${HYSTERIA1_PORT}/${HYSTERIA2_PORT}"
-            "ShadowSocks:${SHADOWSOCKS_PORT}"
             "Socks5:${SOCKS5_PORT}"
-            "Squid:${SQUID_PORT}"
             "Stunnel:${STUNNEL_PORT}"
-            "Argo:${ARGO_TUNNEL_HTTP}, ${ARGO_TUNNEL_HTTPS}"
-            "Rest-API:${REST_API_PORT}"
             "WS-SSH:80, 443 (bridge:${WS_SSH_INTERNAL_PORT}) [$(grep -oP '^RESPONSE="\K[^"]*' "$WS_SSH_CONFIG_FILE" 2>/dev/null || echo 'HTTP/1.1 101 Switching Protocols')]"
         )
         local idx=1
