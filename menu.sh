@@ -158,7 +158,7 @@ SERVICE_INFO_DB=(
 #  .tag_name, so version selection works on either host.)
 FF_REPO_HOST="${FF_REPO_HOST:-github}"
 FF_REPO_OWNER="${FF_REPO_OWNER:-SONICE-ENCHIL}"
-FF_REPO_NAME="${FF_REPO_NAME:-VPS_superScript}"
+FF_REPO_NAME="${FF_REPO_NAME:-VPS_superScript-Revamp}"
 FF_REPO_BRANCH="${FF_REPO_BRANCH:-main}"
 
 if [[ "$FF_REPO_HOST" == "github" ]]; then
@@ -873,19 +873,28 @@ _ff_dur_to_seconds() {
     [[ "$matched" -eq 1 ]] && echo "$total" || echo 0
 }
 
-# Convert seconds to trial duration format (20d5h30m)
+# Convert seconds to trial duration format (20d5h30m) — matches the
+# OFFICIAL OnePesewa panel style. Emits a bare duration (no "left" suffix)
+# so callers can wrap it however they like.
 expiry_human() {
-    local s="$1"; local total=0 hh mm dd
-    [[ -z "$s" || "$s" -le 0 ]] && { echo "0d left"; return; }
+    local s="$1" out="" dd hh mm
+    [[ -z "$s" || ! "$s" =~ ^[0-9]+$ || "$s" -le 0 ]] && { echo "0d"; return; }
     ((dd = s / 86400)); ((s %= 86400))
-    ((hh = s / 3600)); ((s %= 3600))
-    ((mm = s / 60)); ((s %= 60))
-    local out=""
+    ((hh = s / 3600));  ((s %= 3600))
+    ((mm = s / 60));    ((s %= 60))
     [ "$dd" -gt 0 ] && out="${dd}d"
-    [ "$hh" -gt 0 ] && { [ -n "$out" ] && out+=", "; out+="${hh}h"; }
-    [ "$mm" -gt 0 ] && { [ -n "$out" ] && out+=", "; out+="${mm}m"; }
-    [ -z "$out" ] && out="0m"
-    printf '%s left' "$out"
+    [ "$hh" -gt 0 ] && out="${out}${hh}h"
+    [ "$mm" -gt 0 ] && out="${out}${mm}m"
+    [ -z "$out" ] && out="<1m"
+    printf '%s' "$out"
+}
+
+# Human "+durations" (e.g. 2d4h30m) rendered with a trailing "left" label for
+# creation/renewal confirmations:  "20d5h30m left".
+expiry_human_left() {
+    local s="$1" h; h=$(expiry_human "$s")
+    [[ "$h" == "<1m" ]] && { echo "<1m left"; return; }
+    printf '%s left' "$h"
 }
 
 # True (rc 0) when a quota entry is well-formed: 100MB / 2GB / 1.5GB / a bare
@@ -2270,6 +2279,7 @@ create_user() {
     duration_input=${duration_input:-30d}
     local duration_secs; duration_secs=$(_ff_dur_to_seconds "$duration_input")
     if [[ "$duration_secs" -le 0 ]]; then echo -e "\n${C_RED}❌ Invalid duration. Use e.g. 30m, 2h, 1d, 2d4h30m.${C_RESET}"; return; fi
+    local duration_display; duration_display=$(expiry_human_left "$duration_secs")
     read -p "📶 Enter simultaneous connection limit [1]: " limit
     limit=${limit:-1}
     if ! [[ "$limit" =~ ^[0-9]+$ ]]; then echo -e "\n${C_RED}❌ Invalid number.${C_RESET}"; return; fi
@@ -2471,7 +2481,7 @@ HYCEOF
     fi
     echo -e "  - 👤 Username:          ${C_YELLOW}$username${C_RESET}"
     echo -e "  - 🔑 Password:          ${C_YELLOW}$password${C_RESET}"
-    echo -e "  - 🗓️ Expires on:        ${C_YELLOW}$expire_date${C_RESET}"
+    echo -e "  - 🗓️ Expires on:        ${C_YELLOW}$expire_date${C_RESET}  (${C_CYAN}$duration_display${C_RESET})"
     echo -e "  - 📶 Connection Limit:  ${C_YELLOW}$limit${C_RESET}"
     echo -e "  - 📦 Bandwidth Limit:   ${C_YELLOW}$bw_display${C_RESET}"
     if [[ -n "$hwid" ]]; then
@@ -2543,7 +2553,7 @@ view_user_details() {
     fi
 
     local _now_ts; printf -v _now_ts '%(%s)T' -1
-    local _days_str; _days_str=$(_ff_days_left_str "$cur_expiry" "$_now_ts")
+    local _days_str; _days_str=$(_ff_days_left_str "$cur_expiry" "$_now_ts" "$username")
     local _days_color; _days_color=$(_ff_days_left_color "$_days_str")
 
     local hwid_display="${C_DIM}none (multi-device)${C_RESET}"
@@ -2612,7 +2622,7 @@ edit_user() {
             hwid_display="${C_YELLOW}$(_ff_hwid_label "$cur_hwid" "$cur_strict" enforce)${C_RESET}"
         fi
         local _now_ts; printf -v _now_ts '%(%s)T' -1
-        local _days_disp; _days_disp=$(_ff_days_left_str "$cur_expiry" "$_now_ts")
+        local _days_disp; _days_disp=$(_ff_days_left_str "$cur_expiry" "$_now_ts" "$username")
         local app_display="${C_CYAN}HTTP Custom${C_RESET}"
         case "$cur_app" in
             zivpn)       app_display="${C_CYAN}ZiVPN${C_RESET}" ;;
@@ -3262,18 +3272,35 @@ unlock_user() {
     systemctl is-active --quiet shadowsocks-libev 2>/dev/null && systemctl try-restart shadowsocks-libev 2>/dev/null
 }
 
-# Compact "days left until expiry" string for an expiry date (YYYY-MM-DD), given
-# the current epoch. Echoes "Never" / "Expired" / "<1d" / "${n}d".
+# Compact "time left until expiry" string in official trial-duration style
+# (e.g. "20d5h30m"), given an expiry date (YYYY-MM-DD) and the current epoch.
+# An optional 3rd arg (username) makes it prefer the precise .ts epoch, so
+# sub-day durations count down accurately instead of rounding to a full day.
 _ff_days_left_str() {
-    local expiry="$1" now="$2" ts diff d
+    local expiry="$1" now="$2" user="${3:-}" ts diff dd hh mm
     [[ -z "$expiry" || "$expiry" == "Never" ]] && { printf 'Never'; return; }
-    ts=$(date -d "$expiry" +%s 2>/dev/null || echo 0)
+    # Precise sub-day epoch beats the rounded calendar date when present.
+    if [[ -n "$user" && -f "$TRIAL_EXPIRY_DIR/${user}.ts" ]]; then
+        local _p=0; read -r _p < "$TRIAL_EXPIRY_DIR/${user}.ts" 2>/dev/null || _p=0
+        [[ "$_p" =~ ^[0-9]+$ ]] && (( _p > 0 )) && ts="$_p" || ts=0
+    else
+        ts=0
+    fi
+    if (( ts <= 0 )); then
+        ts=$(date -d "$expiry 23:59:59" +%s 2>/dev/null || date -d "$expiry" +%s 2>/dev/null || echo 0)
+    fi
     [[ "$ts" =~ ^[0-9]+$ ]] && (( ts > 0 )) || { printf 'N/A'; return; }
     diff=$(( ts - now ))
     (( diff <= 0 )) && { printf 'Expired'; return; }
-    d=$(( diff / 86400 ))
-    (( d == 0 )) && { printf '<1d'; return; }
-    printf '%dd' "$d"
+    dd=$(( diff / 86400 )); diff=$(( diff % 86400 ))
+    hh=$(( diff / 3600 ));  diff=$(( diff % 3600 ))
+    mm=$(( diff / 60 ))
+    local out=""
+    [ "$dd" -gt 0 ] && out="${dd}d"
+    [ "$hh" -gt 0 ] && out="${out}${hh}h"
+    [ "$mm" -gt 0 ] && out="${out}${mm}m"
+    [ -z "$out" ] && out="<1m"
+    printf '%s' "$out"
 }
 
 # Pick a color for a days-left string produced by _ff_days_left_str.
@@ -3282,9 +3309,9 @@ _ff_days_left_color() {
     case "$s" in
         Never)   printf '%s' "$C_DIM" ;;
         Expired) printf '%s' "$C_RED" ;;
-        "<1d")   printf '%s' "$C_RED" ;;
+        "<1m"*)  printf '%s' "$C_RED" ;;
         N/A)     printf '%s' "$C_DIM" ;;
-        *) local n="${s%d}"
+        *) local n="${s%%[!0-9]*}"
            if [[ "$n" =~ ^[0-9]+$ ]] && (( n <= 3 )); then printf '%s' "$C_RED"
            elif [[ "$n" =~ ^[0-9]+$ ]] && (( n <= 7 )); then printf '%s' "$C_YELLOW"
            else printf '%s' "$C_GREEN"; fi ;;
@@ -3303,7 +3330,7 @@ list_users() {
     echo -e "${C_CYAN}=====================================================================================================${C_RESET}"
 
     # Column headers row
-    printf "${C_BOLD}${C_WHITE}%-18s ${C_RESET}| ${C_YELLOW}%-12s ${C_RESET}| ${C_ORANGE}%-10s ${C_RESET}| ${C_GREEN}%-10s ${C_RESET}\n" \
+    printf "${C_BOLD}${C_WHITE}%-18s ${C_RESET}| ${C_YELLOW}%-12s ${C_RESET}| ${C_ORANGE}%-10s ${C_RESET}| ${C_GREEN}%-20s ${C_RESET}\n" \
             "USERNAME" "STATUS" "HWID" "EXPIRES"
     echo -e "${C_CYAN}-----------------------------------------------------------------------------------------------------${C_RESET}"
 
@@ -3342,7 +3369,7 @@ list_users() {
         local connection_string="$online_count / $limit"
         local plain_status="Active"
         local status="${C_GREEN}🟢 Active${C_RESET}"
-        local quota_exceeded=false
+        local _quota_hit=false
 
         [[ -z "$bandwidth_gb" ]] && bandwidth_gb="0"
         local bw_string; bw_string=$(_ff_quota_label "$bandwidth_gb")
@@ -3357,7 +3384,7 @@ list_users() {
             used_h=$(awk "BEGIN {b=$used_bytes; if (b>=1073741824) printf \"%.1f GB\", b/1073741824; else if (b>=1048576) printf \"%.1f MB\", b/1048576; else printf \"%.0f KB\", b/1024}")
             bw_string="${used_h}/${bandwidth_gb}"
             if (( used_bytes >= quota_bytes )); then
-                quota_exceeded=true
+                _quota_hit=true
             fi
         fi
 
@@ -3387,20 +3414,34 @@ list_users() {
             pause_display="⏱ --"
         fi
 
-        # Expires format (trial duration)
+        # Expires format (trial duration). Prefer the precise .ts epoch so
+        # sub-day durations count down accurately (as the official panel does),
+        # falling back to the stored calendar date when no timestamp exists.
         if [[ -z "$expiry" || "$expiry" == "Never" ]]; then
             expires_display="N/A"
-        elif [[ "$expiry" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
-            expiry_ts=$(date -d "$expiry 23:59:59" +%s 2>/dev/null || echo 0)
-            if [[ "$expiry_ts" =~ ^[0-9]+$ ]] && (( expiry_ts > current_ts )); then
-                remaining=$((expiry_ts - current_ts))
-                expires_display=$(expiry_human "$remaining")
-            else
-                expires_display="0d left"
-            fi
         else
-            # Already a duration string like "2d4h30m"
-            expires_display="${expiry} left"
+            local _precise_ts=0
+            if [[ -f "$TRIAL_EXPIRY_DIR/${user}.ts" ]]; then
+                read -r _precise_ts < "$TRIAL_EXPIRY_DIR/${user}.ts" 2>/dev/null || _precise_ts=0
+            fi
+            [[ "$_precise_ts" =~ ^[0-9]+$ ]] || _precise_ts=0
+            if (( _precise_ts > 0 )); then
+                if (( _precise_ts > current_ts )); then
+                    expires_display=$(expiry_human_left $(( _precise_ts - current_ts )))
+                else
+                    expires_display="0d left"
+                fi
+            elif [[ "$expiry" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+                expiry_ts=$(date -d "$expiry 23:59:59" +%s 2>/dev/null || echo 0)
+                if [[ "$expiry_ts" =~ ^[0-9]+$ ]] && (( expiry_ts > current_ts )); then
+                    expires_display=$(expiry_human_left $(( expiry_ts - current_ts )))
+                else
+                    expires_display="0d left"
+                fi
+            else
+                # Already a duration string like "2d4h30m"
+                expires_display="${expiry} left"
+            fi
         fi
 
         # Status coloring
@@ -3409,16 +3450,21 @@ list_users() {
             status="${C_RED}Not Found${C_RESET}"
             ((expired_count++))
         elif [[ -n "$expiry" && "$expiry" != "Never" ]]; then
-            expiry_ts
-            expiry_ts=$(date -d "$expiry" +%s 2>/dev/null || echo 0)
-            if [[ "$expiry_ts" =~ ^[0-9]+$ ]] && (( expiry_ts > 0 && expiry_ts < current_ts )); then
+            # Use the same effective epoch as the countdown (precise .ts wins),
+            # so "Expired" and the EXPIRES column never disagree for sub-day trials.
+            local _eff_ts=0
+            if [[ -f "$TRIAL_EXPIRY_DIR/${user}.ts" ]]; then
+                read -r _eff_ts < "$TRIAL_EXPIRY_DIR/${user}.ts" 2>/dev/null || _eff_ts=0
+            fi
+            [[ "$_eff_ts" =~ ^[0-9]+$ ]] && (( _eff_ts > 0 )) || _eff_ts=$(date -d "$expiry" +%s 2>/dev/null || echo 0)
+            if [[ "$_eff_ts" =~ ^[0-9]+$ ]] && (( _eff_ts > 0 && _eff_ts < current_ts )); then
                 plain_status="Expired"
                 status="${C_RED}🗓️ Expired${C_RESET}"
                 ((expired_count++))
             fi
         fi
 
-        if [[ "$plain_status" == "Active" && "$quota_exceeded" == true ]]; then
+        if [[ "$plain_status" == "Active" && "$_quota_hit" == true ]]; then
             if [[ -n "${locked_user_lookup[$user]+x}" ]]; then
                 plain_status="BW Locked"
                 status="${C_RED}🔒 BW Locked${C_RESET}"
@@ -3426,12 +3472,13 @@ list_users() {
                 plain_status="Quota Exceeded"
                 status="${C_RED}📦 Quota Exceeded${C_RESET}"
             fi
+            ((quota_exceeded++))
         elif [[ "$plain_status" == "Active" && -n "${locked_user_lookup[$user]+x}" ]]; then
             plain_status="Locked"
             status="${C_YELLOW}🔒 Locked${C_RESET}"
         fi
 
-        ((active_count++))
+        [[ "$plain_status" == "Active" ]] && ((active_count++))
 
         local line_color="$C_WHITE"
         case "$plain_status" in
@@ -3443,10 +3490,7 @@ list_users() {
             "Not Found") line_color="$C_DIM" ;;
         esac
 
-        local days_left_disp; days_left_disp=$(_ff_days_left_str "$expiry" "$current_ts")
-        local days_left_color; days_left_color=$(_ff_days_left_color "$days_left_disp")
-
-        printf "${line_color}%-18s ${C_RESET}| ${C_YELLOW}%-12s ${C_RESET}| ${C_ORANGE}%s${C_RESET} ${C_RESET}| ${C_GREEN}%-10s ${C_RESET}\n" \
+        printf "${line_color}%-18s ${C_RESET}| ${C_YELLOW}%-12s ${C_RESET}| ${C_ORANGE}%s${C_RESET} ${C_RESET}| ${C_GREEN}%-20s ${C_RESET}\n" \
                 "$user" "$status" "$hwid_emoji" "$expires_display"
     done < <(sort "$DB_FILE")
 
@@ -3464,10 +3508,11 @@ renew_user() {
     read -p "👉 Enter duration to extend the account(s) (e.g. 30d, 7d, 2h, 2d4h30m): " duration_input
     local duration_secs; duration_secs=$(_ff_dur_to_seconds "$duration_input")
     if [[ "$duration_secs" -le 0 ]]; then echo -e "\n${C_RED}❌ Invalid duration. Use e.g. 30d, 7d, 2h.${C_RESET}"; return; fi
+    local duration_display; duration_display=$(expiry_human_left "$duration_secs")
     local new_expire_date; new_expire_date=$(date -d "+${duration_secs} seconds" +%Y-%m-%d)
     [[ "$new_expire_date" == "$(date +%Y-%m-%d)" ]] && new_expire_date=$(date -d "tomorrow" +%Y-%m-%d)
     
-    echo -e "\n${C_BLUE}🔄 Renewing selected users for $duration_input...${C_RESET}"
+    echo -e "\n${C_BLUE}🔄 Renewing selected users for $duration_input (${C_CYAN}$duration_display${C_BLUE})...${C_RESET}"
     for u in "${SELECTED_USERS[@]}"; do
         chage -E "$new_expire_date" "$u"
         local line pass _expiry limit bw marker hwid strict app
@@ -3484,7 +3529,7 @@ renew_user() {
         # Restore access immediately in case the account was auto-locked/blocked
         # for expiry before this renewal (SSH + UDP, incl. ZiVPN password).
         _ff_restore_user_all_protocols "$u"
-        echo -e " ✅ ${C_YELLOW}$u${C_RESET} renewed until ${C_GREEN}${new_expire_date}${C_RESET}."
+        echo -e " ✅ ${C_YELLOW}$u${C_RESET} renewed until ${C_GREEN}${new_expire_date}${C_RESET}  (${C_CYAN}$duration_display${C_RESET})."
     done
     local _renewed="${SELECTED_USERS[*]}"
     _send_telegram "🔔 <b>User(s) Renewed</b>%0A👤 $_renewed%0A🗓️ New expiry: $new_expire_date"
@@ -7603,6 +7648,7 @@ bulk_create_users() {
     duration_input=${duration_input:-30d}
     local duration_secs; duration_secs=$(_ff_dur_to_seconds "$duration_input")
     if [[ "$duration_secs" -le 0 ]]; then echo -e "\n${C_RED}❌ Invalid duration. Use e.g. 30d, 7d, 2d4h30m.${C_RESET}"; return; fi
+    local duration_display; duration_display=$(expiry_human_left "$duration_secs")
     
     read -p "📶 Connection limit per user [1]: " limit
     limit=${limit:-1}
@@ -7629,11 +7675,12 @@ bulk_create_users() {
     expire_date=$(date -d "+${duration_secs} seconds" +%Y-%m-%d)
     [[ "$expire_date" == "$(date +%Y-%m-%d)" ]] && expire_date=$(date -d "tomorrow" +%Y-%m-%d)
     local bw_display; bw_display=$(_ff_quota_label "$bandwidth_gb")
+    local duration_display; duration_display=$(expiry_human_left "$duration_secs")
     ensure_VPS_superScript_system_group
     
     echo -e "\n${C_BLUE}⚙️ Creating $count users with prefix '${prefix}'...${C_RESET}\n"
     echo -e "${C_YELLOW}================================================================${C_RESET}"
-    printf "${C_BOLD}${C_WHITE}%-20s | %-15s | %-12s${C_RESET}\n" "USERNAME" "PASSWORD" "EXPIRES"
+    printf "${C_BOLD}${C_WHITE}%-20s | %-15s | %-20s${C_RESET}\n" "USERNAME" "PASSWORD" "EXPIRES"
     echo -e "${C_YELLOW}----------------------------------------------------------------${C_RESET}"
     
     local created=0
@@ -7753,7 +7800,7 @@ WGCEOF
 }
 HYCEOF
         fi
-        printf "  ${C_GREEN}%-20s${C_RESET} | ${C_YELLOW}%-15s${C_RESET} | ${C_CYAN}%-12s${C_RESET}\n" "$username" "$password" "$expire_date"
+        printf "  ${C_GREEN}%-20s${C_RESET} | ${C_YELLOW}%-15s${C_RESET} | ${C_CYAN}%-20s${C_RESET}\n" "$username" "$password" "$expire_date  ($duration_display)"
         created=$((created + 1))
     done
 

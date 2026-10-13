@@ -14,7 +14,7 @@ echo "Installing VPS_superScript Manager..."
 #   FF_REPO_HOST=github FF_REPO_OWNER=youruser FF_REPO_NAME=YourRepo bash install.sh
 FF_REPO_HOST="${FF_REPO_HOST:-github}"
 FF_REPO_OWNER="${FF_REPO_OWNER:-SONICE-ENCHIL}"
-FF_REPO_NAME="${FF_REPO_NAME:-VPS_superScript}"
+FF_REPO_NAME="${FF_REPO_NAME:-VPS_superScript-Revamp}"
 FF_REPO_BRANCH="${FF_REPO_BRANCH:-main}"
 
 if [[ "$FF_REPO_HOST" == "github" ]]; then
@@ -30,14 +30,36 @@ SSHD_URL="$RAW_BASE/ssh"
 download_file() {
     local dest=$1
     local url=$2
+    local tmp
+    tmp="$(mktemp)"
+    # Download to a temp file first so a failed or partial fetch can never
+    # clobber an existing file (critical for /etc/ssh/sshd_config).
     if command -v curl &> /dev/null; then
-        curl -sL -o "$dest" "$url"
+        if ! curl -fsSL --retry 3 --connect-timeout 30 -o "$tmp" "$url"; then
+            rm -f "$tmp"
+            echo "Error: failed to download $url"
+            echo "       Make sure the repo/branch is public and the file exists."
+            exit 1
+        fi
     elif command -v wget &> /dev/null; then
-        wget -q -O "$dest" "$url"
+        if ! wget -q --tries=3 --timeout=30 -O "$tmp" "$url"; then
+            rm -f "$tmp"
+            echo "Error: failed to download $url"
+            echo "       Make sure the repo/branch is public and the file exists."
+            exit 1
+        fi
     else
+        rm -f "$tmp"
         echo "Error: Neither curl nor wget is installed."
         exit 1
     fi
+    # Guard against an empty download (e.g. a redirected error page served 200).
+    if [[ ! -s "$tmp" ]]; then
+        rm -f "$tmp"
+        echo "Error: downloaded file from $url is empty."
+        exit 1
+    fi
+    mv -f "$tmp" "$dest"
 }
 
 # Install menu
