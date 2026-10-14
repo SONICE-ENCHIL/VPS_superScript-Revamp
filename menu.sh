@@ -9508,7 +9508,7 @@ main_menu() {
         show_banner
 
         # Tight ADMcgh-style item list: no blank spacers, one hub per line.
-        _mi "01" "👤 USER CONTROL (CREATE/DELETE/RENEW/LOCK)" "▸"
+        _mi "01" "👤 USERS CONTROL" "▸"
         _mi "02" "🔌 PROTOCOLS & SERVICES" "▸"
         _mi "03" "📊 MONITORING & TRAFFIC" "▸"
         _mi "04" "🎨 ACCESS & CONTENT" "▸"
