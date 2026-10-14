@@ -2275,7 +2275,7 @@ create_user() {
             break
         fi
     done
-    read -r -p "🗓️ duration (e.g. 20d5h30m) [30d]: " duration_input
+    read -r -p "🗓️ duration (e.g. 20d5h30m): " duration_input
     duration_input=${duration_input:-30d}
     local duration_secs; duration_secs=$(_ff_dur_to_seconds "$duration_input")
     if [[ "$duration_secs" -le 0 ]]; then echo -e "\n${C_RED}❌ Invalid duration. Use e.g. 30m, 2h, 1d, 2d4h30m.${C_RESET}"; return; fi
