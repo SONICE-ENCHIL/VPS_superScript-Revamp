@@ -6949,7 +6949,7 @@ show_banner() {
         'BEGIN{exit !(l > c*0.7)}' && _cpu_col="$C_RED"
 
     echo -e "$BAR"
-    echo -e "${C_TITLE}            🦅  Skylartech Inno | Premium  🦅${C_RESET}"
+    echo -e "${C_TITLE}            🦅  VPS_superScript | Premium  🦅${C_RESET}"
     echo -e "$BAR"
     echo -e "  $DOT ${C_YELLOW}ONLINE:${C_RESET} ${C_GREEN}${BANNER_CACHE_ONLINE_USERS}${C_RESET}   $DOT ${C_YELLOW}EXP:${C_RESET} ${C_GREEN}${BANNER_CACHE_EXPIRED_USERS}${C_RESET}   $DOT ${C_YELLOW}HWID:${C_RESET} ${_hwid}   $DOT ${C_YELLOW}UDP-LOCK:${C_RESET} ${_ushare}"
     echo -e "  $DOT ${C_YELLOW}S.O:${C_RESET} ${C_WHITE}${BANNER_CACHE_OS_NAME}${C_RESET}   $DOT ${C_YELLOW}Base:${C_RESET} ${C_WHITE}${BANNER_CACHE_BASE}${C_RESET}   $DOT ${C_YELLOW}CPU's:${C_RESET} ${C_WHITE}${BANNER_CACHE_CPU_COUNT}${C_RESET}"
@@ -7046,10 +7046,8 @@ _PROTO_LIST=(
     "10|HYSTERIA 1/2|hysteria-server"
     "11|SHADOWSOCKS|shadowsocks-libev"
     "12|SOCKS5 PROXY|danted"
-    "13|SQUID PROXY|squid"
-    "14|STUNNEL|stunnel4"
-    "15|ARGO TUNNEL|argo-tunnel"
-    "16|WS-SSH|ws-ssh"
+    "13|STUNNEL|stunnel4"
+    "14|WS-SSH|ws-ssh"
 )
 
 # Print the roster two per row with live status tags. $1 is the arrow/verb
@@ -7125,10 +7123,8 @@ install_protocols_menu() {
             10) install_hysteria; press_enter ;;
             11) install_shadowsocks; press_enter ;;
             12) install_socks5; press_enter ;;
-            13) install_squid; press_enter ;;
-            14) install_stunnel; press_enter ;;
-            15) install_argo_tunnel; press_enter ;;
-            16) install_ws_ssh; press_enter ;;
+            13) install_stunnel; press_enter ;;
+            14) install_ws_ssh; press_enter ;;
             0) return ;;
             *) invalid_option ;;
         esac
@@ -7160,10 +7156,8 @@ uninstall_protocols_menu() {
             10) uninstall_hysteria; press_enter ;;
             11) uninstall_shadowsocks; press_enter ;;
             12) uninstall_socks5; press_enter ;;
-            13) uninstall_squid; press_enter ;;
-            14) uninstall_stunnel; press_enter ;;
-            15) uninstall_argo_tunnel; press_enter ;;
-            16) uninstall_ws_ssh; press_enter ;;
+            13) uninstall_stunnel; press_enter ;;
+            14) uninstall_ws_ssh; press_enter ;;
             0) return ;;
             *) invalid_option ;;
         esac
@@ -7308,9 +7302,7 @@ uninstall_script() {
     uninstall_hysteria 2>/dev/null
     uninstall_shadowsocks 2>/dev/null
     uninstall_socks5 2>/dev/null
-    uninstall_squid 2>/dev/null
     uninstall_stunnel 2>/dev/null
-    uninstall_argo_tunnel 2>/dev/null
     uninstall_ws_ssh 2>/dev/null
     systemctl stop rest-api 2>/dev/null; systemctl disable rest-api 2>/dev/null
     echo -e "\n${C_BLUE}🗑️ Removing HWID lock enforcer...${C_RESET}"
@@ -10612,9 +10604,7 @@ on_off_service_menu() {
             "hysteria-server:Hysteria"
             "shadowsocks-libev:ShadowSocks"
             "danted:Socks5"
-            "squid:Squid"
             "stunnel4:Stunnel"
-            "argo-tunnel:Argo"
             "badvpn:BadVPN"
             "udp-custom:UDP-Custom"
             "zivpn.service:ZiVPN"
@@ -10988,15 +10978,9 @@ clear; show_banner
                         sed -i "s/internal:.*port = .*/internal: 0.0.0.0 port = $new_port/" /etc/danted.conf 2>/dev/null
                         systemctl try-restart danted 2>/dev/null
                         SOCKS5_PORT="$new_port" ;;
-                    Squid)
-                        sed -i "s/http_port .*/http_port $new_port/" /etc/squid/squid.conf 2>/dev/null
-                        systemctl try-restart squid 2>/dev/null
-                        SQUID_PORT="$new_port" ;;
                     Stunnel)
                         echo -e "${C_YELLOW}⚠️ Update /etc/stunnel/*.conf manually with new port.${C_RESET}"
                         STUNNEL_PORT="$new_port" ;;
-                    Argo)
-                        echo -e "${C_YELLOW}⚠️ Argo tunnel port configured via cloudflared config. Update manually.${C_RESET}" ;;
                     Rest-API)
                         sed -i "s/PORT = .*/PORT = $new_port/" /usr/local/bin/VPS_superScript-api.py 2>/dev/null
                         systemctl try-restart rest-api 2>/dev/null
@@ -11108,15 +11092,8 @@ service_info_menu() {
             echo -e "   ${C_WHITE}── SOCKS5 (Dante)${C_RESET}"
             echo -e "      ${C_DIM}nano /etc/danted.conf${C_RESET}"
             echo
-            echo -e "   ${C_WHITE}── Squid${C_RESET}"
-            echo -e "      ${C_DIM}nano /etc/squid/squid.conf${C_RESET}"
-            echo
             echo -e "   ${C_WHITE}── Stunnel${C_RESET}"
             echo -e "      ${C_DIM}nano /etc/stunnel/stunnel.conf${C_RESET}"
-            echo
-            echo -e "   ${C_WHITE}── Argo Tunnel (Cloudflared)${C_RESET}"
-            echo -e "      ${C_DIM}cloudflared tunnel list${C_RESET}"
-            echo -e "      ${C_DIM}cloudflared tunnel info <name>${C_RESET}"
             echo
             echo -e "   ${C_CYAN}── Fetch User Configs (replace <username>)${C_RESET}"
             echo -e "      ${C_DIM}cat ${EXPORTS_DIR}/<username>.ovpn${C_RESET}"

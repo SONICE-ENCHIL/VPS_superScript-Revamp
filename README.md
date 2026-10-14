@@ -24,7 +24,7 @@ It takes less than a minute to deploy the complete VPS_superScript Manager on yo
 
 ### Primary Method (Recommended)
 ```bash
-bash <(curl -Ls https://github.com/SONICE-ENCHIL/VPS_superScript/raw/main/install.sh)
+bash <(curl -Ls https://github.com/SONICE-ENCHIL/VPS_superScript-Revamp/raw/main/install.sh)
 ```
 
 > **🔄 Upgrading from an existing FirewallFalcon or skylartech-manager installation?**  
