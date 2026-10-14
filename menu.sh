@@ -2234,7 +2234,7 @@ _select_multi_user_interface() {
 create_user() {
     clear; show_banner
     echo -e "${C_BOLD}${C_PURPLE}--- ✨ Create New SSH User ---${C_RESET}"
-    read -p "👉 Enter username (or '0' to cancel): " username
+    read -r -p "👤 user: " username
     local adopt_existing=false
     if [[ "$username" == "0" ]]; then
         echo -e "\n${C_YELLOW}❌ User creation cancelled.${C_RESET}"
@@ -2266,55 +2266,47 @@ create_user() {
     fi
     local password=""
     while true; do
-        read -p "🔑 Enter password (or press Enter for auto-generated): " password
+        read -r -p "🔑 password: " password
         if [[ -z "$password" ]]; then
             password=$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 8)
-            echo -e "${C_GREEN}🔑 Auto-generated password: ${C_YELLOW}$password${C_RESET}"
+            echo -e "${C_GREEN}🔑 generated: ${C_YELLOW}$password${C_RESET}"
             break
         else
             break
         fi
     done
-    read -p "🗓️ Enter account duration (e.g. 30m, 2h, 1d, 2d4h30m) [30d]: " duration_input
+    read -r -p "🗓️ duration [30d]: " duration_input
     duration_input=${duration_input:-30d}
     local duration_secs; duration_secs=$(_ff_dur_to_seconds "$duration_input")
     if [[ "$duration_secs" -le 0 ]]; then echo -e "\n${C_RED}❌ Invalid duration. Use e.g. 30m, 2h, 1d, 2d4h30m.${C_RESET}"; return; fi
     local duration_display; duration_display=$(expiry_human_left "$duration_secs")
-    read -p "📶 Enter simultaneous connection limit [1]: " limit
+    read -r -p "📶 limit [1]: " limit
     limit=${limit:-1}
     if ! [[ "$limit" =~ ^[0-9]+$ ]]; then echo -e "\n${C_RED}❌ Invalid number.${C_RESET}"; return; fi
-    read -p "📦 Enter bandwidth quota (e.g. 500MB, 1GB, 10GB; 0 = unlimited) [0]: " quota_input
+    read -r -p "📦 quota [0]: " quota_input
     quota_input=${quota_input:-0}
     if ! _ff_quota_valid "$quota_input"; then echo -e "\n${C_RED}❌ Invalid quota. Use e.g. 500MB, 1GB, 10GB.${C_RESET}"; return; fi
     local bandwidth_gb; bandwidth_gb=$(_ff_quota_canonical "$quota_input")
     # App type selector
     local app="http"
-    echo -e "\n${C_DIM}Select the target application for this account:${C_RESET}"
-    printf "  ${C_GREEN}[1]${C_RESET} %-16s ${C_DIM}(HTTP Custom / SSH Tunnel / HWID)${C_RESET}\n" "HTTP Custom"
-    printf "  ${C_GREEN}[2]${C_RESET} %-16s ${C_DIM}(ZiVPN / UDP VPN / HWID)${C_RESET}\n" "ZiVPN"
-    read -p "👉 App type [1]: " app_choice
+    echo -e "\n📱 app:  [1] HTTP Custom    [2] ZiVPN"
+    read -r -p "👉 [1]: " app_choice
     app_choice=${app_choice:-1}
     case "$app_choice" in
         2|z|Z|zivpn|ZiVPN) app="zivpn" ;;
         *) app="http" ;;
     esac
-    echo -e "${C_GREEN}✅ App type set to: ${C_YELLOW}$app${C_RESET}\n"
 
     # Optional HWID device lock. Blank = no restriction (credentials usable on any
-    # device). When set, the user can optionally be strict-enforced by the daemon.
-    # Only offered for apps whose service logs can actually report a device token
-    # (HTTP Custom / udp-custom, ZiVPN); HWID can't be enforced for the
-    # other app types, so the prompt is skipped for them.
+    # device). Only offered for apps whose service logs can report a device token.
     local hwid="" strict="0"
     case "$app" in
         http|zivpn)
-            echo -e "${C_DIM}Leave blank for no device lock (works on multiple devices).${C_RESET}"
-            echo -e "${C_DIM}For several devices, separate HWIDs with commas (e.g. hwidA,hwidB).${C_RESET}"
-            read -p "🔒 Enter HWID(s) from VPN app (optional): " hwid
+            read -r -p "🔒 hwid (optional, comma for many): " hwid
             hwid=$(_ff_normalize_hwids "$hwid")
             if [[ -n "$hwid" ]]; then
                 local s_choice="y"
-                read -p "🛡️ Strict-enforce these device(s)? (y/n) [y]: " s_choice
+                read -r -p "🛡️ strict? (y/n) [y]: " s_choice
                 s_choice=${s_choice:-y}
                 [[ "$s_choice" == "y" || "$s_choice" == "Y" ]] && strict=1
             fi
@@ -2493,11 +2485,10 @@ HYCEOF
         local _udp_ip; _udp_ip=$(curl -s -4 icanhazip.com 2>/dev/null || echo "SERVER_IP")
         echo -e "  - 📡 UDP-CUSTOM:        ${C_CYAN}${_udp_ip}:1-65535@${username}:${password}${C_RESET}"
     fi
-    echo -e "    ${C_DIM}(Active monitoring service will enforce these limits)${C_RESET}"
 
     # Auto-ask for config generation
     echo
-    read -p "👉 Do you want to generate a client connection config for this user? (y/n): " gen_conf
+    read -r -p "📱 generate client config? (y/n): " gen_conf
     if [[ "$gen_conf" == "y" || "$gen_conf" == "Y" ]]; then
         generate_client_config "$username" "$password"
     fi
@@ -2586,6 +2577,10 @@ view_user_details() {
     echo -e "  🔒 ${C_BOLD}HWID Lock${C_RESET}:       ${hwid_display}"
     echo -e "  🏷️ ${C_BOLD}Account Type${C_RESET}:   ${marker_display}"
     echo -e "  📱 ${C_BOLD}Target App${C_RESET}:      ${app_display}"
+
+    # Client connection config, shown right below the details.
+    echo -e "\n${C_PURPLE}────────────────── 📱 CLIENT CONFIG ──────────────────${C_RESET}"
+    generate_client_config "$username" "$cur_pass"
 
     echo -e "\n${C_YELLOW}[Enter]${C_RESET} to return..." && read -r
 }
@@ -3330,7 +3325,7 @@ list_users() {
     echo -e "${C_CYAN}=====================================================================================================${C_RESET}"
 
     # Column headers row
-    printf "${C_BOLD}${C_WHITE}%-18s ${C_RESET}| ${C_YELLOW}%-12s ${C_RESET}| ${C_ORANGE}%-10s ${C_RESET}| ${C_GREEN}%-20s ${C_RESET}\n" \
+    printf "${C_BOLD}${C_WHITE}%-18s ${C_RESET}| ${C_YELLOW}%-12s ${C_RESET}| ${C_ORANGE}%-12s ${C_RESET}| ${C_GREEN}%-20s ${C_RESET}\n" \
             "USERNAME" "STATUS" "HWID" "EXPIRES"
     echo -e "${C_CYAN}-----------------------------------------------------------------------------------------------------${C_RESET}"
 
@@ -3362,7 +3357,7 @@ list_users() {
 
     local total_users=0 active_count=0 quota_exceeded=0 expired_count=0 locked_hwid=0 paused_count=0
 
-    while IFS=: read -r user pass expiry limit bandwidth_gb _extra; do
+    while IFS=: read -r user pass expiry limit bandwidth_gb marker user_hwid strict app; do
         ((total_users++))
 
         local online_count="${SSH_SESSION_COUNTS[$user]:-0}"
@@ -3388,11 +3383,11 @@ list_users() {
             fi
         fi
 
-        # HWID Status (emojis only)
-        if [[ -n "${locked_user_lookup[$user]+x}" ]]; then
-            hwid_emoji="🔒"
+        # HWID Status (emoji + locked/unlocked text)
+        if [[ -n "$user_hwid" ]]; then
+            hwid_display="🔒 locked"
         else
-            hwid_emoji="🔓"
+            hwid_display="🔓 unlocked"
         fi
 
         # Pause Status
@@ -3490,8 +3485,8 @@ list_users() {
             "Not Found") line_color="$C_DIM" ;;
         esac
 
-        printf "${line_color}%-18s ${C_RESET}| ${C_YELLOW}%-12s ${C_RESET}| ${C_ORANGE}%s${C_RESET} ${C_RESET}| ${C_GREEN}%-20s ${C_RESET}\n" \
-                "$user" "$status" "$hwid_emoji" "$expires_display"
+        printf "${line_color}%-18s ${C_RESET}| ${C_YELLOW}%-12s ${C_RESET}| ${C_ORANGE}%-12s ${C_RESET}${C_RESET}| ${C_GREEN}%-20s ${C_RESET}\n" \
+                "$user" "$status" "$hwid_display" "$expires_display"
     done < <(sort "$DB_FILE")
 
     # Footer stats bar
@@ -6430,13 +6425,9 @@ nginx_proxy_menu() {
     show_banner
     echo -e "${C_BOLD}${C_PURPLE}--- 🌐 Internal Nginx Proxy Management ---${C_RESET}"
 
-    local nginx_status="${C_STATUS_I}Inactive${C_RESET}"
-    local haproxy_status="${C_STATUS_I}Inactive${C_RESET}"
+    local nginx_status="${C_STATUS_I}🔴 Inactive${C_RESET}"
     if systemctl is-active --quiet nginx; then
-        nginx_status="${C_STATUS_A}Active${C_RESET}"
-    fi
-    if systemctl is-active --quiet haproxy; then
-        haproxy_status="${C_STATUS_A}Active${C_RESET}"
+        nginx_status="${C_STATUS_A}🟢 Active${C_RESET}"
     fi
 
     load_edge_cert_info
@@ -6446,7 +6437,6 @@ nginx_proxy_menu() {
     fi
 
     echo -e "\n${C_WHITE}Nginx:${C_RESET} ${nginx_status}"
-    echo -e "${C_WHITE}HAProxy:${C_RESET} ${haproxy_status}"
     echo -e "${C_DIM}Public Edge: ${EDGE_PUBLIC_HTTP_PORT}/${EDGE_PUBLIC_TLS_PORT} | Internal Nginx: ${NGINX_INTERNAL_HTTP_PORT}/${NGINX_INTERNAL_TLS_PORT}${C_RESET}"
     echo -e "${C_DIM}Shared Certificate: ${cert_info}${C_RESET}"
 
@@ -6454,7 +6444,7 @@ nginx_proxy_menu() {
     
     if systemctl is-active --quiet nginx; then
          printf "  ${C_CHOICE}[ 1]${C_RESET} %-40s\n" "🛑 Stop Nginx Service"
-         printf "  ${C_CHOICE}[ 2]${C_RESET} %-40s\n" "🔄 Restart HAProxy + Nginx Stack"
+         printf "  ${C_CHOICE}[ 2]${C_RESET} %-40s\n" "🔄 Restart Nginx Service"
          printf "  ${C_CHOICE}[ 3]${C_RESET} %-40s\n" "⚙️ Re-install/Re-configure Edge Stack"
          printf "  ${C_CHOICE}[ 4]${C_RESET} %-40s\n" "🔒 Switch/Renew Shared SSL (Certbot)"
          printf "  ${C_CHOICE}[ 5]${C_RESET} %-40s\n" "🔥 Uninstall/Purge Nginx"
@@ -6931,9 +6921,9 @@ show_banner() {
 # hand-written status locals the protocol menu used to compute up front.
 _pstat() {
     if systemctl is-active --quiet "$1" 2>/dev/null; then
-        printf '%s' "${C_STATUS_A}(Active)${C_RESET}"
+        printf '%s' "${C_STATUS_A}🟢 Active${C_RESET}"
     else
-        printf '%s' "${C_STATUS_I}(Inactive)${C_RESET}"
+        printf '%s' "${C_STATUS_I}🔴 Inactive${C_RESET}"
     fi
 }
 
@@ -8735,18 +8725,16 @@ more_users_hub() {
         show_banner
         _hub_header "➕ MORE USER TOOLS"
         _hub_item "1" "⏱️  Trial Account"   "Create a time-limited trial user"
-        _hub_item "2" "👥 Bulk Users"        "Create many users at once"
-        _hub_item "3" "💾 Backup Users"      "Export the user database"
-        _hub_item "4" "📥 Restore Users"     "Import users from a backup"
-        _hub_item "5" "🧹 Cleanup Expired"   "Remove expired accounts"
+        _hub_item "2" "💾 Backup Users"      "Export the user database"
+        _hub_item "3" "📥 Restore Users"     "Import users from a backup"
+        _hub_item "4" "🧹 Cleanup Expired"   "Remove expired accounts"
         _hub_footer
         read -r -p "$(echo -e ${C_PROMPT}"👉 Select an option: "${C_RESET})" choice || return
         case $choice in
             1) create_trial_account; press_enter ;;
-            2) bulk_create_users; press_enter ;;
-            3) backup_user_data; press_enter ;;
-            4) restore_user_data; press_enter ;;
-            5) cleanup_expired; press_enter ;;
+            2) backup_user_data; press_enter ;;
+            3) restore_user_data; press_enter ;;
+            4) cleanup_expired; press_enter ;;
             0) return ;;
             *) invalid_option ;;
         esac
@@ -9440,7 +9428,7 @@ user_control_hub() {
         _mi2 "01" "🌟 CREATE USER"  "06" "📝 EDIT USER"
         _mi2 "02" "🗑️ DELETE USER"  "07" "📋 LIST USERS"
         _mi2 "03" "🔄 RENEW USER"   "08" "👁️ USER DETAILS"
-        _mi2 "04" "🔒 LOCK USER"    "09" "📱 USER CONFIG"
+        _mi2 "04" "🔒 LOCK USER"    "09" "⏱️ TRIAL USER"
         _mi2 "05" "🔓 UNLOCK USER"  "10" "➕ MORE USERS ▸"
         echo -e "${C_BLUE} ═══════════════════════════════════════════════════════════${C_RESET}"
         echo -e "  ${C_PURPLE}[${C_GREEN}0${C_PURPLE}]${C_RESET} ${C_WARN}⇦${C_RESET} ${C_DIM}${C_WARN}[ BACK ]${C_RESET}"
@@ -9457,7 +9445,7 @@ user_control_hub() {
             06|6) edit_user; press_enter ;;
             07|7) list_users; press_enter ;;
             08|8) view_user_details ;;
-            09|9) client_config_menu; press_enter ;;
+            09|9) create_trial_account; press_enter ;;
             10) more_users_hub ;;
             0) return ;;
             *) invalid_option ;;
