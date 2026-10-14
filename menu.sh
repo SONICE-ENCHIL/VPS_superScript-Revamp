@@ -3402,17 +3402,19 @@ list_users() {
             fi
         fi
 
-        # BANDWIDTH dot: usage level (left) + cap (right). Level colour:
+        # BANDWIDTH dot: usage level (left, big circle) + cap (right, small dot).
+        # Use U+25CF ● for the cap — it renders fully everywhere, unlike the
+        # variable-selector ⦿ which some terminals clip. Level colour:
         # green <50%, yellow 50-79%, red >=80%, grey = unlimited.
         local bw_dot
         if (( quota_bytes <= 0 )); then
-            bw_dot="${C_GRAY}⚪${C_RESET} ${C_BLUE}⦿${C_RESET}"
+            bw_dot="${C_GRAY}⚪${C_RESET}${C_BLUE}●${C_RESET}"
         elif (( used_bytes * 10 >= quota_bytes * 8 )); then
-            bw_dot="${C_RED}🔴${C_RESET} ${C_BLUE}⦿${C_RESET}"
+            bw_dot="${C_RED}🔴${C_RESET}${C_BLUE}●${C_RESET}"
         elif (( used_bytes * 10 >= quota_bytes * 5 )); then
-            bw_dot="${C_YELLOW}🟡${C_RESET} ${C_BLUE}⦿${C_RESET}"
+            bw_dot="${C_YELLOW}🟡${C_RESET}${C_BLUE}●${C_RESET}"
         else
-            bw_dot="${C_GREEN}🟢${C_RESET} ${C_BLUE}⦿${C_RESET}"
+            bw_dot="${C_GREEN}🟢${C_RESET}${C_BLUE}●${C_RESET}"
         fi
 
         # HWID Status (emoji + locked/unlocked text)
