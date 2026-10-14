@@ -3316,10 +3316,13 @@ _ff_days_left_color() {
 list_users() {
     clear; show_banner
 
-    # Width-aware, centered layout so rules never wrap or distort on small screens.
-    local TW; TW=$(tput cols 2>/dev/null); [[ "$TW" =~ ^[0-9]+$ ]] && (( TW >= 40 )) || TW=80
-    local W=72; (( W > TW - 2 )) && W=$(( TW - 2 ))
-    local LEAD=$(( (TW - W) / 2 )); (( LEAD < 0 )) && LEAD=0
+    # Fixed absolute columns (cursor-positioned). Unlike %-Ns padding — which
+    # counts ANSI bytes and double-width emojis wrongly — placing each field on
+    # a screen column forces perfect vertical alignment and prevents clipping.
+    local TW; TW=$(tput cols 2>/dev/null); [[ "$TW" =~ ^[0-9]+$ ]] && (( TW >= 20 )) || TW=80
+    local T=78; (( T > TW )) && T=$TW          # total table width incl. box corners
+    local W=$(( T - 2 )); (( W < 20 )) && W=20 # ═ fill width
+    local LEAD=$(( (TW - T) / 2 )); (( LEAD < 0 )) && LEAD=0
     local PAD; PAD="$(printf '%*s' "$LEAD" '')"
     local rule_e rule_d _i; rule_e=""; rule_d=""
     for ((_i=0;_i<W;_i++)); do rule_e+="═"; rule_d+="─"; done
@@ -3329,9 +3332,19 @@ list_users() {
     echo -e "${PAD}  ${C_PURPLE}📋  MANAGED USERS${C_RESET}"
     echo -e "${PAD}${C_BOLD}${C_PURPLE}╚${rule_e}╝${C_RESET}"
 
-    # Column headers row
-    printf "%s${C_BOLD}${C_WHITE}%-2s ${C_RESET}| ${C_YELLOW}%-15s ${C_RESET}| ${C_ORANGE}%-11s ${C_RESET}| ${C_GREEN}%-10s ${C_RESET}| ${C_BLUE}%-6s ${C_RESET}| ${C_CYAN}%-12s ${C_RESET}\n" \
-            "$PAD" "#" "USERNAME" "STATUS" "HWID" "BW CAP" "EXPIRES"
+    # Column headers row (absolute columns)
+    printf '\033[%dG%s\033[%dG%s\033[%dG%s\033[%dG%s\033[%dG%s\033[%dG%s\033[%dG%s\033[%dG%s\033[%dG%s\033[%dG%s\033[%dG%s\033[K\n' \
+        "$((LEAD+1))" "${C_BOLD}${C_WHITE}#${C_RESET}" \
+        "$((LEAD+4))" "${C_DIM}│${C_RESET}" \
+        "$((LEAD+6))" "${C_BOLD}${C_YELLOW}USERNAME${C_RESET}" \
+        "$((LEAD+24))" "${C_DIM}│${C_RESET}" \
+        "$((LEAD+26))" "${C_BOLD}${C_ORANGE}STATUS${C_RESET}" \
+        "$((LEAD+44))" "${C_DIM}│${C_RESET}" \
+        "$((LEAD+46))" "${C_BOLD}${C_GREEN}HWID${C_RESET}" \
+        "$((LEAD+58))" "${C_DIM}│${C_RESET}" \
+        "$((LEAD+60))" "${C_BOLD}${C_BLUE}BW CAP${C_RESET}" \
+        "$((LEAD+66))" "${C_DIM}│${C_RESET}" \
+        "$((LEAD+68))" "${C_BOLD}${C_CYAN}EXPIRES${C_RESET}"
     echo -e "${PAD}${C_CYAN}${rule_d}${C_RESET}"
 
     if [[ ! -s "$DB_FILE" ]]; then
@@ -3510,8 +3523,18 @@ list_users() {
             line_color="$C_YELLOW"
         fi
 
-        printf "%s${line_color}%-2s ${C_RESET}| ${line_color}%-15s ${C_RESET}| ${C_YELLOW}%-11s ${C_RESET}| ${C_ORANGE}%-10s ${C_RESET}| ${C_BLUE}%-6s ${C_RESET}| ${C_GREEN}%-12s ${C_RESET}\n" \
-                "$PAD" "$idx" "$user" "$status" "$hwid_display" "$bw_dot" "$expires_display"
+        printf '\033[%dG%s\033[%dG%s\033[%dG%s\033[%dG%s\033[%dG%s\033[%dG%s\033[%dG%s\033[%dG%s\033[%dG%s\033[%dG%s\033[%dG%s\033[K\n' \
+                "$((LEAD+1))" "${line_color}${idx}${C_RESET}" \
+                "$((LEAD+4))" "${C_DIM}│${C_RESET}" \
+                "$((LEAD+6))" "${line_color}${user}${C_RESET}" \
+                "$((LEAD+24))" "${C_DIM}│${C_RESET}" \
+                "$((LEAD+26))" "${status}" \
+                "$((LEAD+44))" "${C_DIM}│${C_RESET}" \
+                "$((LEAD+46))" "${C_ORANGE}${hwid_display}${C_RESET}" \
+                "$((LEAD+58))" "${C_DIM}│${C_RESET}" \
+                "$((LEAD+60))" "${bw_dot}" \
+                "$((LEAD+66))" "${C_DIM}│${C_RESET}" \
+                "$((LEAD+68))" "${C_GREEN}${expires_display}${C_RESET}"
     done < <(sort "$DB_FILE")
 
     # Footer stats — 2x2 summary grid
