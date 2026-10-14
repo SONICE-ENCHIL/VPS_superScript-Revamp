@@ -3320,7 +3320,7 @@ list_users() {
     # counts ANSI bytes and double-width emojis wrongly — placing each field on
     # a screen column forces perfect vertical alignment and prevents clipping.
     local TW; TW=$(tput cols 2>/dev/null); [[ "$TW" =~ ^[0-9]+$ ]] && (( TW >= 20 )) || TW=80
-    local T=74; (( T > TW )) && T=$TW          # total table width incl. box corners
+    local T=66; (( T > TW )) && T=$TW          # total table width incl. box corners
     local W=$(( T - 2 )); (( W < 20 )) && W=20 # ═ fill width
     local LEAD=0                                # centering disabled (left-aligned)
     local PAD; PAD="$(printf '%*s' "$LEAD" '')"
@@ -3339,12 +3339,12 @@ list_users() {
         "$((LEAD+6))" "${C_BOLD}${C_YELLOW}USERNAME${C_RESET}" \
         "$((LEAD+20))" "${C_DIM}│${C_RESET}" \
         "$((LEAD+22))" "${C_BOLD}${C_ORANGE}STATUS${C_RESET}" \
-        "$((LEAD+40))" "${C_DIM}│${C_RESET}" \
-        "$((LEAD+42))" "${C_BOLD}${C_GREEN}HWID${C_RESET}" \
-        "$((LEAD+53))" "${C_DIM}│${C_RESET}" \
-        "$((LEAD+55))" "${C_BOLD}${C_BLUE}BW CAP${C_RESET}" \
-        "$((LEAD+62))" "${C_DIM}│${C_RESET}" \
-        "$((LEAD+64))" "${C_BOLD}${C_CYAN}EXPIRES${C_RESET}"
+        "$((LEAD+33))" "${C_DIM}│${C_RESET}" \
+        "$((LEAD+35))" "${C_BOLD}${C_GREEN}HWID${C_RESET}" \
+        "$((LEAD+46))" "${C_DIM}│${C_RESET}" \
+        "$((LEAD+48))" "${C_BOLD}${C_BLUE}BW CAP${C_RESET}" \
+        "$((LEAD+55))" "${C_DIM}│${C_RESET}" \
+        "$((LEAD+57))" "${C_BOLD}${C_CYAN}EXPIRES${C_RESET}"
     echo -e "${PAD}${C_CYAN}${rule_d}${C_RESET}"
 
     if [[ ! -s "$DB_FILE" ]]; then
@@ -3499,7 +3499,7 @@ list_users() {
                 status="${C_RED}🔒 BW Locked${C_RESET}"
             else
                 plain_status="Quota Exceeded"
-                status="${C_RED}📦 Quota Exceeded${C_RESET}"
+                status="${C_RED}📦 exce..${C_RESET}"
             fi
             ((quota_exceeded++))
         elif [[ "$plain_status" == "Active" && -n "${locked_user_lookup[$user]+x}" ]]; then
@@ -3531,12 +3531,12 @@ list_users() {
                 "$((LEAD+6))" "${line_color}${user}${C_RESET}" \
                 "$((LEAD+20))" "${C_DIM}│${C_RESET}" \
                 "$((LEAD+22))" "${status}" \
-                "$((LEAD+40))" "${C_DIM}│${C_RESET}" \
-                "$((LEAD+42))" "${C_ORANGE}${hwid_display}${C_RESET}" \
-                "$((LEAD+53))" "${C_DIM}│${C_RESET}" \
-                "$((LEAD+55))" "${bw_dot}" \
-                "$((LEAD+62))" "${C_DIM}│${C_RESET}" \
-                "$((LEAD+64))" "${C_GREEN}${expires_display}${C_RESET}"
+                "$((LEAD+33))" "${C_DIM}│${C_RESET}" \
+                "$((LEAD+35))" "${C_ORANGE}${hwid_display}${C_RESET}" \
+                "$((LEAD+46))" "${C_DIM}│${C_RESET}" \
+                "$((LEAD+48))" "${bw_dot}" \
+                "$((LEAD+55))" "${C_DIM}│${C_RESET}" \
+                "$((LEAD+57))" "${C_GREEN}${expires_display}${C_RESET}"
     done < <(sort "$DB_FILE")
 
     # Footer stats — 2x2 summary grid
