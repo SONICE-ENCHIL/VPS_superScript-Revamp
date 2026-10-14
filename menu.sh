@@ -6425,9 +6425,9 @@ nginx_proxy_menu() {
     show_banner
     echo -e "${C_BOLD}${C_PURPLE}--- 🌐 Internal Nginx Proxy Management ---${C_RESET}"
 
-    local nginx_status="${C_STATUS_I}🔴 Inactive${C_RESET}"
+    local nginx_status="🔴"
     if systemctl is-active --quiet nginx; then
-        nginx_status="${C_STATUS_A}🟢 Active${C_RESET}"
+        nginx_status="🟢"
     fi
 
     load_edge_cert_info
@@ -6921,9 +6921,9 @@ show_banner() {
 # hand-written status locals the protocol menu used to compute up front.
 _pstat() {
     if systemctl is-active --quiet "$1" 2>/dev/null; then
-        printf '%s' "${C_STATUS_A}🟢 Active${C_RESET}"
+        printf '%s' "🟢"
     else
-        printf '%s' "${C_STATUS_I}🔴 Inactive${C_RESET}"
+        printf '%s' "🔴"
     fi
 }
 
