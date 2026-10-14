@@ -9463,7 +9463,7 @@ _mi() {
 # variation-selector emoji (🗑️ ⚙️ 👁️) that render 1 or 2 cells depending on
 # the terminal — printf padding would drift, absolute columns cannot.
 _mi2() {
-    printf "\033[3G${C_PURPLE}[${C_GREEN}%s${C_PURPLE}]${C_RESET}\033[9G${C_WARN}⇨${C_RESET} ${C_WHITE}%s${C_RESET}\033[36G${C_PURPLE}[${C_GREEN}%s${C_PURPLE}]${C_RESET}\033[42G${C_WARN}⇨${C_RESET} ${C_WHITE}%s${C_RESET}\033[K\n" \
+    printf "\033[3G${C_PURPLE}[${C_GREEN}%s${C_PURPLE}]${C_RESET}\033[9G${C_WARN}⇨${C_RESET} ${C_WHITE}%s${C_RESET}\033[34G${C_PURPLE}[${C_GREEN}%s${C_PURPLE}]${C_RESET}\033[40G${C_WARN}⇨${C_RESET} ${C_WHITE}%s${C_RESET}\033[K\n" \
         "$1" "$2" "$3" "$4"
 }
 
