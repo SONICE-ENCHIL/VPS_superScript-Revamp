@@ -3485,6 +3485,12 @@ list_users() {
             "Not Found") line_color="$C_DIM" ;;
         esac
 
+        # Trial accounts stand out: distinct emoji + colour when active.
+        if [[ "$plain_status" == "Active" && "$marker" == "trial" ]]; then
+            status="${C_YELLOW}⏳ Active${C_RESET}"
+            line_color="$C_YELLOW"
+        fi
+
         printf "${line_color}%-18s ${C_RESET}| ${C_YELLOW}%-12s ${C_RESET}| ${C_ORANGE}%-12s ${C_RESET}${C_RESET}| ${C_GREEN}%-20s ${C_RESET}\n" \
                 "$user" "$status" "$hwid_display" "$expires_display"
     done < <(sort "$DB_FILE")
