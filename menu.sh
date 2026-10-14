@@ -8829,13 +8829,11 @@ system_hub() {
         _hub_header "⚙️ SYSTEM & SERVER"
         _hub_item "1" "🔄 Auto-Reboot Task"   "Schedule automatic reboots"
         _hub_item "2" "🕐 Timezone"           "Set the server timezone"
-        _hub_item "3" "💣 Rebuild VPS"        "Wipe & reinstall the server"
         _hub_footer
         read -r -p "$(echo -e ${C_PROMPT}"👉 Select an option: "${C_RESET})" choice || return
         case $choice in
             1) auto_reboot_menu ;;
             2) timezone_menu; press_enter ;;
-            3) rebuild_vps_menu; press_enter ;;
             0) return ;;
             *) invalid_option ;;
         esac
@@ -10738,23 +10736,6 @@ client_details_menu() {
     echo -e "   ${C_GRAY}•${C_RESET} Online Now:     ${C_GREEN}${online}${C_RESET}"
     echo -e "   ${C_GRAY}•${C_RESET} Expired Today:  ${C_YELLOW}${expired_today}${C_RESET}"
     echo -e "   ${C_GRAY}•${C_RESET} Locked:         ${C_RED}${locked}${C_RESET}"
-    echo
-    press_enter
-}
-
-# ── Rebuild VPS ───────────────────────────────────────────
-rebuild_vps_menu() {
-    clear; show_banner
-    echo -e "${C_RED}════════════════════════════════════════════════════${C_RESET}"
-    echo -e "${C_RED}     ⚠️  ⚠️  ⚠️  WARNING ⚠️  ⚠️  ⚠️${C_RESET}"
-    echo -e "${C_RED}════════════════════════════════════════════════════${C_RESET}"
-    echo -e "\n${C_YELLOW}This option requires a provider that supports"
-    echo -e "automatic OS reinstall via netboot/GRUB.${C_RESET}"
-    echo -e "\n${C_DIM}Most providers (Contabo, DigitalOcean, Vultr, Hetzner)"
-    echo -e "require using their control panel to reinstall the OS.${C_RESET}"
-    echo -e "\n${C_DIM}For supported providers, a scripted reinstall option"
-    echo -e "may be added in future releases.${C_RESET}"
-    echo -e "\n${C_CYAN}Detected OS: $(grep -oP 'PRETTY_NAME="\K[^"]+' /etc/os-release 2>/dev/null || echo "Linux")${C_RESET}"
     echo
     press_enter
 }
