@@ -3495,10 +3495,12 @@ list_users() {
                 "$user" "$status" "$hwid_display" "$expires_display"
     done < <(sort "$DB_FILE")
 
-    # Footer stats bar
-    echo -e "${C_BOLD}${C_PURPLE}╔═══════════════════════════════════════════${C_RESET}"
-    echo -e "${C_BOLD}${C_CYAN}║  📊  Total: ${total_users} users  | Active: ${active_count} | Quota Exceeded: ${quota_exceeded} | Expired: ${expired_count}${C_RESET}${C_BOLD}║${C_RESET}"
-    echo -e "${C_BOLD}${C_PURPLE}╚══════════════════════════════════════════${C_RESET}"
+    # Footer stats — 2x2 summary grid
+    echo -e "${C_BOLD}${C_PURPLE}╔══════════════════════════════════════════════════╗${C_RESET}"
+    printf "  ${C_BOLD}📊  SUMMARY${C_RESET}\n"
+    printf "\033[3G%s\033[26G%s\033[K\n" "${C_WHITE}👥 Total: ${total_users}${C_RESET}" "${C_GREEN}🟢 Active: ${active_count}${C_RESET}"
+    printf "\033[3G%s\033[26G%s\033[K\n" "${C_WHITE}📦 Quota: ${quota_exceeded}${C_RESET}" "${C_RED}🗓️ Expired: ${expired_count}${C_RESET}"
+    echo -e "${C_BOLD}${C_PURPLE}╚══════════════════════════════════════════════════╝${C_RESET}"
 
     echo -e "${C_CYAN}=====================================================================================================${C_RESET}\n"
 }
