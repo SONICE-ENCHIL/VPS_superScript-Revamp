@@ -3316,30 +3316,23 @@ _ff_days_left_color() {
 list_users() {
     clear; show_banner
 
-    # Responsive layout. Wide auto-centered table on normal terminals; a
-    # compact card list on narrow (phone) terminals so emojis/labels are not
-    # clipped by the limited width.
+    # Width-aware, centered layout so rules never wrap or distort on small screens.
     local TW; TW=$(tput cols 2>/dev/null); [[ "$TW" =~ ^[0-9]+$ ]] && (( TW >= 40 )) || TW=80
-    local compact=0; (( TW < 56 )) && compact=1
     local W=72; (( W > TW - 2 )) && W=$(( TW - 2 ))
     local LEAD=$(( (TW - W) / 2 )); (( LEAD < 0 )) && LEAD=0
     local PAD; PAD="$(printf '%*s' "$LEAD" '')"
     local rule_e rule_d _i; rule_e=""; rule_d=""
     for ((_i=0;_i<W;_i++)); do rule_e+="═"; rule_d+="─"; done
 
-    if (( compact )); then
-        echo -e "${C_BOLD}${C_PURPLE}📋  MANAGED USERS${C_RESET}"
-        echo -e "${C_CYAN}${rule_d}${C_RESET}"
-    else
-        # Top decorative header box (centered)
-        echo -e "${PAD}${C_BOLD}${C_PURPLE}╔${rule_e}╗${C_RESET}"
-        echo -e "${PAD}  ${C_PURPLE}📋  MANAGED USERS${C_RESET}"
-        echo -e "${PAD}${C_BOLD}${C_PURPLE}╚${rule_e}╝${C_RESET}"
-        # Column headers row
-        printf "%s${C_BOLD}${C_WHITE}%-2s ${C_RESET}| ${C_YELLOW}%-15s ${C_RESET}| ${C_ORANGE}%-11s ${C_RESET}| ${C_GREEN}%-10s ${C_RESET}| ${C_BLUE}%-6s ${C_RESET}| ${C_CYAN}%-12s ${C_RESET}\n" \
-                "$PAD" "#" "USERNAME" "STATUS" "HWID" "BW CAP" "EXPIRES"
-        echo -e "${PAD}${C_CYAN}${rule_d}${C_RESET}"
-    fi
+    # Top decorative header box (centered)
+    echo -e "${PAD}${C_BOLD}${C_PURPLE}╔${rule_e}╗${C_RESET}"
+    echo -e "${PAD}  ${C_PURPLE}📋  MANAGED USERS${C_RESET}"
+    echo -e "${PAD}${C_BOLD}${C_PURPLE}╚${rule_e}╝${C_RESET}"
+
+    # Column headers row
+    printf "%s${C_BOLD}${C_WHITE}%-2s ${C_RESET}| ${C_YELLOW}%-15s ${C_RESET}| ${C_ORANGE}%-11s ${C_RESET}| ${C_GREEN}%-10s ${C_RESET}| ${C_BLUE}%-6s ${C_RESET}| ${C_CYAN}%-12s ${C_RESET}\n" \
+            "$PAD" "#" "USERNAME" "STATUS" "HWID" "BW CAP" "EXPIRES"
+    echo -e "${PAD}${C_CYAN}${rule_d}${C_RESET}"
 
     if [[ ! -s "$DB_FILE" ]]; then
         echo -e "\n${C_YELLOW}ℹ️ No users are currently being managed.${C_RESET}"
@@ -3517,27 +3510,16 @@ list_users() {
             line_color="$C_YELLOW"
         fi
 
-        if (( compact )); then
-            printf " %s%2d%s) %s   %s\n" "${C_DIM}" "$idx" "${C_RESET}" "${line_color}${user}${C_RESET}" "$status"
-            printf "    %s   %s   ⏳ %s\n" "${C_ORANGE}${hwid_display}${C_RESET}" "${bw_dot}" "${C_GREEN}${expires_display}${C_RESET}"
-            echo -e "${C_DIM}────────────────────────────────${C_RESET}"
-        else
-            printf "%s${line_color}%-2s ${C_RESET}| ${line_color}%-15s ${C_RESET}| ${C_YELLOW}%-11s ${C_RESET}| ${C_ORANGE}%-10s ${C_RESET}| ${C_BLUE}%-6s ${C_RESET}| ${C_GREEN}%-12s ${C_RESET}\n" \
-                    "$PAD" "$idx" "$user" "$status" "$hwid_display" "$bw_dot" "$expires_display"
-        fi
+        printf "%s${line_color}%-2s ${C_RESET}| ${line_color}%-15s ${C_RESET}| ${C_YELLOW}%-11s ${C_RESET}| ${C_ORANGE}%-10s ${C_RESET}| ${C_BLUE}%-6s ${C_RESET}| ${C_GREEN}%-12s ${C_RESET}\n" \
+                "$PAD" "$idx" "$user" "$status" "$hwid_display" "$bw_dot" "$expires_display"
     done < <(sort "$DB_FILE")
 
-    # Footer stats — 2x2 grid on wide screens; single compact line on phones.
-    if (( compact )); then
-        echo -e "${C_CYAN}${rule_d}${C_RESET}"
-        echo -e "📊 ${C_WHITE}Total: ${total_users}${C_RESET}  ${C_GREEN}🟢 ${active_count}${C_RESET}  ${C_RED}📦 ${quota_exceeded}${C_RESET}  ${C_RED}🗓️ ${expired_count}${C_RESET}"
-    else
-        echo -e "${PAD}${C_BOLD}${C_PURPLE}╔${rule_e}╗${C_RESET}"
-        echo -e "${PAD}  ${C_BOLD}📊  SUMMARY${C_RESET}"
-        printf "%s  %s        %s\n" "$PAD" "${C_WHITE}👥 Total: ${total_users}${C_RESET}" "${C_GREEN}🟢 Active: ${active_count}${C_RESET}"
-        printf "%s  %s        %s\n" "$PAD" "${C_WHITE}📦 Quota: ${quota_exceeded}${C_RESET}" "${C_RED}🗓️ Expired: ${expired_count}${C_RESET}"
-        echo -e "${PAD}${C_BOLD}${C_PURPLE}╚${rule_e}╝${C_RESET}"
-    fi
+    # Footer stats — 2x2 summary grid
+    echo -e "${PAD}${C_BOLD}${C_PURPLE}╔${rule_e}╗${C_RESET}"
+    echo -e "${PAD}  ${C_BOLD}📊  SUMMARY${C_RESET}"
+    printf "%s  %s        %s\n" "$PAD" "${C_WHITE}👥 Total: ${total_users}${C_RESET}" "${C_GREEN}🟢 Active: ${active_count}${C_RESET}"
+    printf "%s  %s        %s\n" "$PAD" "${C_WHITE}📦 Quota: ${quota_exceeded}${C_RESET}" "${C_RED}🗓️ Expired: ${expired_count}${C_RESET}"
+    echo -e "${PAD}${C_BOLD}${C_PURPLE}╚${rule_e}╝${C_RESET}"
     echo ""
 }
 
