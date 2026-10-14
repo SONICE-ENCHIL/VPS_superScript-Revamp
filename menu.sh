@@ -3318,7 +3318,7 @@ list_users() {
 
     # Width-aware, centered layout so rules never wrap or distort on small screens.
     local TW; TW=$(tput cols 2>/dev/null); [[ "$TW" =~ ^[0-9]+$ ]] && (( TW >= 40 )) || TW=80
-    local W=72; (( W > TW - 2 )) && W=$(( TW - 2 ))
+    local W=75; (( W > TW - 2 )) && W=$(( TW - 2 ))
     local LEAD=$(( (TW - W) / 2 )); (( LEAD < 0 )) && LEAD=0
     local PAD; PAD="$(printf '%*s' "$LEAD" '')"
     local rule_e rule_d _i; rule_e=""; rule_d=""
@@ -3330,8 +3330,8 @@ list_users() {
     echo -e "${PAD}${C_BOLD}${C_PURPLE}╚${rule_e}╝${C_RESET}"
 
     # Column headers row
-    printf "%s${C_BOLD}${C_WHITE}%-3s ${C_RESET}| ${C_YELLOW}%-16s ${C_RESET}| ${C_ORANGE}%-12s ${C_RESET}| ${C_GREEN}%-11s ${C_RESET}| ${C_CYAN}%-18s ${C_RESET}\n" \
-            "$PAD" "#" "USERNAME" "STATUS" "HWID" "EXPIRES"
+    printf "%s${C_BOLD}${C_WHITE}%-2s ${C_RESET}| ${C_YELLOW}%-13s ${C_RESET}| ${C_ORANGE}%-11s ${C_RESET}| ${C_GREEN}%-10s ${C_RESET}| ${C_BLUE}%-12s ${C_RESET}| ${C_CYAN}%-11s ${C_RESET}\n" \
+            "$PAD" "#" "USERNAME" "STATUS" "HWID" "BANDWIDTH" "EXPIRES"
     echo -e "${PAD}${C_CYAN}${rule_d}${C_RESET}"
 
     if [[ ! -s "$DB_FILE" ]]; then
@@ -3428,20 +3428,20 @@ list_users() {
             [[ "$_precise_ts" =~ ^[0-9]+$ ]] || _precise_ts=0
             if (( _precise_ts > 0 )); then
                 if (( _precise_ts > current_ts )); then
-                    expires_display=$(expiry_human_left $(( _precise_ts - current_ts )))
+                    expires_display=$(expiry_human $(( _precise_ts - current_ts )))
                 else
-                    expires_display="0d left"
+                    expires_display="0d"
                 fi
             elif [[ "$expiry" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
                 expiry_ts=$(date -d "$expiry 23:59:59" +%s 2>/dev/null || echo 0)
                 if [[ "$expiry_ts" =~ ^[0-9]+$ ]] && (( expiry_ts > current_ts )); then
-                    expires_display=$(expiry_human_left $(( expiry_ts - current_ts )))
+                    expires_display=$(expiry_human $(( expiry_ts - current_ts )))
                 else
-                    expires_display="0d left"
+                    expires_display="0d"
                 fi
             else
                 # Already a duration string like "2d4h30m"
-                expires_display="${expiry} left"
+                expires_display="${expiry}"
             fi
         fi
 
@@ -3497,8 +3497,8 @@ list_users() {
             line_color="$C_YELLOW"
         fi
 
-        printf "%s${line_color}%-3s ${C_RESET}| ${line_color}%-16s ${C_RESET}| ${C_YELLOW}%-12s ${C_RESET}| ${C_ORANGE}%-11s ${C_RESET}| ${C_GREEN}%-18s ${C_RESET}\n" \
-                "$PAD" "$idx" "$user" "$status" "$hwid_display" "$expires_display"
+        printf "%s${line_color}%-2s ${C_RESET}| ${line_color}%-13s ${C_RESET}| ${C_YELLOW}%-11s ${C_RESET}| ${C_ORANGE}%-10s ${C_RESET}| ${C_BLUE}%-12s ${C_RESET}| ${C_GREEN}%-11s ${C_RESET}\n" \
+                "$PAD" "$idx" "$user" "$status" "$hwid_display" "$bw_string" "$expires_display"
     done < <(sort "$DB_FILE")
 
     # Footer stats — 2x2 summary grid
