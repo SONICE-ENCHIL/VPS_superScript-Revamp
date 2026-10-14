@@ -6896,14 +6896,13 @@ show_banner() {
         'BEGIN{exit !(l > c*0.7)}' && _cpu_col="$C_RED"
 
     echo -e "$BAR"
-    echo -e "${C_TITLE}            🦅  VPS_superScript | Premium  🦅${C_RESET}"
+    echo -e "${C_TITLE}           🦅  SkylarSCRIPT | Premium Edition  🦅${C_RESET}"
     echo -e "$BAR"
-    echo -e "  $DOT ${C_YELLOW}ONLINE:${C_RESET} ${C_GREEN}${BANNER_CACHE_ONLINE_USERS}${C_RESET}   $DOT ${C_YELLOW}EXP:${C_RESET} ${C_GREEN}${BANNER_CACHE_EXPIRED_USERS}${C_RESET}   $DOT ${C_YELLOW}HWID:${C_RESET} ${_hwid}   $DOT ${C_YELLOW}UDP-LOCK:${C_RESET} ${_ushare}"
-    echo -e "  $DOT ${C_YELLOW}S.O:${C_RESET} ${C_WHITE}${BANNER_CACHE_OS_NAME}${C_RESET}   $DOT ${C_YELLOW}Base:${C_RESET} ${C_WHITE}${BANNER_CACHE_BASE}${C_RESET}   $DOT ${C_YELLOW}CPU's:${C_RESET} ${C_WHITE}${BANNER_CACHE_CPU_COUNT}${C_RESET}"
-    echo -e "  $DOT ${C_YELLOW}IP:${C_RESET} ${C_GRAY}${BANNER_CACHE_IP}${C_RESET}   $DOT ${C_YELLOW}DATE:${C_RESET} ${C_WHITE}$(date +"%d/%m/%Y")-$(date +"%H:%M")${C_RESET}"
-    echo -e "  $DOT ${C_YELLOW}USERS:${C_RESET} ${C_GREEN}${BANNER_CACHE_TOTAL_USERS} Managed${C_RESET}   $DOT ${C_YELLOW}DOMAIN:${C_RESET} ${C_WHITE}${BANNER_CACHE_DOMAIN}${C_RESET}"
-    echo -e "  $DOT ${C_YELLOW}UPTIME:${C_RESET} ${C_WHITE}${BANNER_CACHE_UP_TIME}${C_RESET}   $DOT ${C_YELLOW}LOAD:${C_RESET} ${_cpu_col}${BANNER_CACHE_CPU_LOAD}${C_RESET}"
-    echo -e "$BAR"
+    echo -e "  $DOT ${C_YELLOW}IP:${C_RESET}      ${C_GRAY}${BANNER_CACHE_IP}${C_RESET}"
+    echo -e "  $DOT ${C_YELLOW}USERS:${C_RESET}   ${C_GREEN}${BANNER_CACHE_TOTAL_USERS} managed · ${BANNER_CACHE_ONLINE_USERS} online · ${BANNER_CACHE_EXPIRED_USERS} expired${C_RESET}"
+    echo -e "  $DOT ${C_YELLOW}LOCKS:${C_RESET}   ${C_YELLOW}HWID ${_hwid} · UDP-LOCK ${_ushare}${C_RESET}"
+    local _ram_col="$C_GREEN"; awk -v u="${BANNER_CACHE_RAM_USAGE:-0}" 'BEGIN{exit !(u>80)}' && _ram_col="$C_RED"
+    echo -e "  $DOT ${C_YELLOW}STATUS:${C_RESET}  ${C_WHITE}${BANNER_CACHE_UP_TIME} up · load ${_cpu_col}${BANNER_CACHE_CPU_LOAD}${C_RESET} · ${C_GREEN}RAM ${BANNER_CACHE_MEM_USED}/${BANNER_CACHE_MEM_TOTAL}${C_RESET} (${_ram_col}${BANNER_CACHE_RAM_USAGE}%${C_RESET})${C_RESET}"
 
     local -a svc_lbl=() svc_val=()
     svc_lbl+=("SSH:"); svc_val+=("22")
@@ -6955,17 +6954,13 @@ show_banner() {
     fi
     
     local i total=${#svc_lbl[@]}
-    for ((i=0; i<total; i+=3)); do
-        local line="  "
-        local j
-        for ((j=i; j<i+3 && j<total; j++)); do
-            line+="${C_BLUE}∘${C_RESET} ${C_YELLOW}${svc_lbl[j]}${C_RESET} ${C_ORANGE}${svc_val[j]}${C_RESET}   "
-        done
-        echo -e "$line"
+    local ports=""
+    for ((i=0; i<total; i++)); do
+        [[ -n "$ports" ]] && ports+=" · "
+        ports+="${C_ORANGE}${svc_lbl[i]%:} ${svc_val[i]}${C_RESET}"
     done
-    echo -e "  ${C_BLUE}∘${C_RESET} ${C_YELLOW}TOTAL:${C_RESET} ${C_GREEN}${BANNER_CACHE_MEM_TOTAL}${C_RESET}   ${C_BLUE}∘${C_RESET} ${C_YELLOW}FREE:${C_RESET} ${C_GREEN}${BANNER_CACHE_MEM_FREE}${C_RESET}   ${C_BLUE}∘${C_RESET} ${C_YELLOW}IN USE:${C_RESET} ${C_GREEN}${BANNER_CACHE_MEM_USED}${C_RESET}"
-    echo -e "  ${C_BLUE}∘${C_RESET} ${C_YELLOW}U/RAM:${C_RESET} ${C_GREEN}${BANNER_CACHE_RAM_USAGE}%${C_RESET}   ${C_BLUE}∘${C_RESET} ${C_YELLOW}BUFFER:${C_RESET} ${C_GREEN}${BANNER_CACHE_MEM_BUFF}${C_RESET}"
-    echo -e "${C_BLUE} ═══════════════════════════════════════════════════════════${C_RESET}"
+    [[ -n "$ports" ]] && echo -e "  $DOT ${C_YELLOW}PORTS:${C_RESET}   ${ports}"
+    echo -e "$BAR"
 }
 
 # Coloured (Active)/(Inactive) tag for a systemd unit. Replaces the ~20
