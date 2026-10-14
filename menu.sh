@@ -4407,7 +4407,6 @@ obtain_certbot_edge_cert() {
         [[ "$restart_nginx" -eq 1 ]] && systemctl start nginx >/dev/null 2>&1
         return 1
     }
-}
 
     echo -e "\n${C_BLUE}🚀 Requesting a Certbot certificate for ${C_YELLOW}$domain_name${C_RESET}"
     certbot certonly --standalone -d "$domain_name" --non-interactive --agree-tos -m "$email"
@@ -4415,7 +4414,6 @@ obtain_certbot_edge_cert() {
         echo -e "\n${C_RED}❌ Certbot failed to obtain a certificate.${C_RESET}"
         echo -e "${C_YELLOW}ℹ️ Make sure the domain points to this server and port 80 is reachable.${C_RESET}"
         [[ "$restart_nginx" -eq 1 ]] && systemctl start nginx >/dev/null 2>&1
-        [[ "$restart_haproxy" -eq 1 ]] && systemctl start haproxy >/dev/null 2>&1
         return 1
     fi
 
@@ -4424,7 +4422,6 @@ obtain_certbot_edge_cert() {
     if [ ! -f "$certbot_chain" ] || [ ! -f "$certbot_key" ]; then
         echo -e "\n${C_RED}❌ Certbot completed, but the certificate files were not found.${C_RESET}"
         [[ "$restart_nginx" -eq 1 ]] && systemctl start nginx >/dev/null 2>&1
-        [[ "$restart_haproxy" -eq 1 ]] && systemctl start haproxy >/dev/null 2>&1
         return 1
     fi
 
@@ -4432,7 +4429,6 @@ obtain_certbot_edge_cert() {
     cp "$certbot_key" "$SSL_CERT_KEY_FILE"
     build_shared_tls_bundle || {
         [[ "$restart_nginx" -eq 1 ]] && systemctl start nginx >/dev/null 2>&1
-        [[ "$restart_haproxy" -eq 1 ]] && systemctl start haproxy >/dev/null 2>&1
         return 1
     }
     save_edge_cert_info "certbot" "$domain_name" "$email"
@@ -4625,98 +4621,8 @@ EOF
 }
 
 write_haproxy_edge_config() {
-    mkdir -p /etc/haproxy
-    cat > "$HAPROXY_CONFIG" <<EOF
-global
-    log /dev/log local0
-    log /dev/log local1 notice
-    chroot /var/lib/haproxy
-    stats socket /run/haproxy/admin.sock mode 660 level admin expose-fd listeners
-    stats timeout 30s
-    user haproxy
-    group haproxy
-    daemon
-
-defaults
-    log     global
-    mode    tcp
-    option  tcplog
-    option  dontlognull
-    timeout connect 5s
-    timeout client  24h
-    timeout server  24h
-
-# ====================================================================
-# TIER 1: PORT ${EDGE_PUBLIC_HTTP_PORT} (Cleartext Payloads & Raw SSH)
-# ====================================================================
-frontend port_80_edge
-    bind *:${EDGE_PUBLIC_HTTP_PORT}
-    mode tcp
-    tcp-request inspect-delay 2s
-
-    acl is_ssh payload(0,7) -m bin 5353482d322e30
-
-    tcp-request content accept if is_ssh
-    tcp-request content accept if HTTP
-
-    use_backend direct_ssh if is_ssh
-    default_backend nginx_cleartext
-
-# ====================================================================
-# TIER 1: PORT ${EDGE_PUBLIC_TLS_PORT} (TLS v2ray, SSL Payloads, Raw SSH)
-# ====================================================================
-frontend port_443_edge
-    bind *:${EDGE_PUBLIC_TLS_PORT}
-    mode tcp
-    tcp-request inspect-delay 2s
-
-    acl is_ssh payload(0,7) -m bin 5353482d322e30
-    acl is_tls req.ssl_hello_type 1
-    acl has_web_alpn req.ssl_alpn -m sub h2 http/1.1
-
-    tcp-request content accept if is_ssh
-    tcp-request content accept if HTTP
-    tcp-request content accept if is_tls
-
-    use_backend direct_ssh if is_ssh
-    use_backend nginx_cleartext if HTTP
-    use_backend nginx_tls if is_tls has_web_alpn
-    default_backend loopback_ssl_terminator
-
-# ====================================================================
-# TIER 2: INTERNAL DECRYPTOR (Only for Any-SNI SSH-TLS)
-# ====================================================================
-frontend internal_decryptor
-    bind 127.0.0.1:${HAPROXY_INTERNAL_DECRYPT_PORT} ssl crt ${SSL_CERT_FILE}
-    mode tcp
-    tcp-request inspect-delay 2s
-
-    acl is_ssh payload(0,7) -m bin 5353482d322e30
-    tcp-request content accept if is_ssh
-    tcp-request content accept if HTTP
-
-    use_backend direct_ssh if is_ssh
-    default_backend nginx_cleartext
-
-# ====================================================================
-# DESTINATION BACKENDS (Clean handoffs, no proxy headers)
-# ====================================================================
-backend direct_ssh
-    mode tcp
-    server ssh_server 127.0.0.1:22
-
-backend nginx_cleartext
-    mode tcp
-    server nginx_8880 127.0.0.1:${NGINX_INTERNAL_HTTP_PORT}
-
-backend nginx_tls
-    mode tcp
-    server nginx_8443 127.0.0.1:${NGINX_INTERNAL_TLS_PORT}
-
-backend loopback_ssl_terminator
-    mode tcp
-    server haproxy_ssl 127.0.0.1:${HAPROXY_INTERNAL_DECRYPT_PORT}
-EOF
+    # HAProxy edge stack removed — no-op (protocol stripped from the panel).
+    :
 }
 
 save_edge_ports_info() {
