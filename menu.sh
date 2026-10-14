@@ -7376,41 +7376,17 @@ create_trial_account() {
         systemctl start atd &>/dev/null
     fi
     
-    echo -e "\n${C_CYAN}Select trial duration:${C_RESET}\n"
-    printf "  ${C_GREEN}[ 1]${C_RESET} ⏱️  30 Minutes\n"
-    printf "  ${C_GREEN}[ 2]${C_RESET} ⏱️  1 Hour\n"
-    printf "  ${C_GREEN}[ 3]${C_RESET} ⏱️  2 Hours\n"
-    printf "  ${C_GREEN}[ 4]${C_RESET} ⏱️  3 Hours\n"
-    printf "  ${C_GREEN}[ 5]${C_RESET} ⏱️  6 Hours\n"
-    printf "  ${C_GREEN}[ 6]${C_RESET} ⏱️  12 Hours\n"
-    printf "  ${C_GREEN}[ 7]${C_RESET} 📅  1 Day\n"
-    printf "  ${C_GREEN}[ 8]${C_RESET} 📅  3 Days\n"
-    printf "  ${C_GREEN}[ 9]${C_RESET} ⚙️  Custom (e.g. 30m, 2h, 2d4h30m)\n"
-    echo -e "\n  ${C_RED}[ 0]${C_RESET} ↩️ Cancel"
-    echo
-    read -p "👉 Select duration: " dur_choice
-
+    echo -e "\n${C_CYAN}Enter trial duration (official format). Examples: 30m · 2h · 1d · 2d4h30m${C_RESET}"
+    local duration_input=""
+    read -p "🗓️ Duration (e.g. 30m, 2h, 1d, 2d4h30m): " duration_input
+    if [[ -z "$duration_input" ]]; then
+        echo -e "\n${C_YELLOW}❌ Cancelled.${C_RESET}"; return
+    fi
     local duration_secs=0
-    local duration_label=""
-    case $dur_choice in
-        1) duration_secs=1800;   duration_label="30 Minutes" ;;
-        2) duration_secs=3600;   duration_label="1 Hour" ;;
-        3) duration_secs=7200;   duration_label="2 Hours" ;;
-        4) duration_secs=10800;  duration_label="3 Hours" ;;
-        5) duration_secs=21600;  duration_label="6 Hours" ;;
-        6) duration_secs=43200;  duration_label="12 Hours" ;;
-        7) duration_secs=86400;  duration_label="1 Day" ;;
-        8) duration_secs=259200; duration_label="3 Days" ;;
-        9) read -p "👉 Enter duration (e.g. 30m, 2h, 1d, 2d4h30m): " custom_dur
-           duration_secs=$(_ff_dur_to_seconds "$custom_dur")
-           if [[ "$duration_secs" -lt 60 ]]; then
-               echo -e "\n${C_RED}❌ Invalid duration (minimum 1 minute).${C_RESET}"; return
-           fi
-           duration_label="$custom_dur"
-           ;;
-        0) echo -e "\n${C_YELLOW}❌ Cancelled.${C_RESET}"; return ;;
-        *) echo -e "\n${C_RED}❌ Invalid option.${C_RESET}"; return ;;
-    esac
+    duration_secs=$(_ff_dur_to_seconds "$duration_input")
+    if [[ "$duration_secs" -lt 60 ]]; then
+        echo -e "\n${C_RED}❌ Invalid duration (minimum 1 minute). Use e.g. 30m, 2h, 1d, 2d4h30m.${C_RESET}"; return
+    fi
     local duration_minutes=$(( (duration_secs + 59) / 60 ))
     
     # Username
@@ -7594,7 +7570,8 @@ HYCEOF
     echo "$TRIAL_CLEANUP_SCRIPT $username" | at now + ${duration_minutes} minutes 2>/dev/null
     
     local bw_display; bw_display=$(_ff_quota_label "$bandwidth_gb")
-    
+    local duration_human; duration_human=$(expiry_human_left "$duration_secs")
+
     clear; show_banner
     echo -e "${C_GREEN}✅ Trial account created successfully!${C_RESET}\n"
     echo -e "${C_YELLOW}========================================${C_RESET}"
@@ -7602,7 +7579,7 @@ HYCEOF
     echo -e "${C_YELLOW}========================================${C_RESET}"
     echo -e "  - 👤 Username:          ${C_YELLOW}$username${C_RESET}"
     echo -e "  - 🔑 Password:          ${C_YELLOW}$password${C_RESET}"
-    echo -e "  - ⏱️ Duration:          ${C_CYAN}$duration_label${C_RESET}"
+    echo -e "  - ⏱️ Duration:          ${C_GREEN}$duration_human${C_RESET}"
     echo -e "  - 🕐 Auto-expires at:   ${C_RED}$expiry_timestamp${C_RESET}"
     echo -e "  - 📶 Connection Limit:  ${C_YELLOW}$limit${C_RESET}"
     echo -e "  - 📦 Bandwidth Limit:   ${C_YELLOW}$bw_display${C_RESET}"
