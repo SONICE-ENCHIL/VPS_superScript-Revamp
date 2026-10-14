@@ -6954,12 +6954,20 @@ show_banner() {
     fi
     
     local i total=${#svc_lbl[@]}
-    local ports=""
-    for ((i=0; i<total; i++)); do
-        [[ -n "$ports" ]] && ports+=" · "
-        ports+="${C_ORANGE}${svc_lbl[i]%:} ${svc_val[i]}${C_RESET}"
-    done
-    [[ -n "$ports" ]] && echo -e "  $DOT ${C_YELLOW}PORTS:${C_RESET}   ${ports}"
+    if (( total > 0 )); then
+        echo -e "  $DOT ${C_YELLOW}PORTS:${C_RESET}"
+        local pi a b
+        for ((pi=0; pi<total; pi+=2)); do
+            a="${C_ORANGE}${svc_lbl[pi]%:} ${svc_val[pi]}${C_RESET}"
+            b=""
+            (( pi+1 < total )) && b="${C_ORANGE}${svc_lbl[pi+1]%:} ${svc_val[pi+1]}${C_RESET}"
+            if [[ -n "$b" ]]; then
+                printf '\033[13G%s\033[41G%s\033[K\n' "$a" "$b"
+            else
+                printf '\033[13G%s\033[K\n' "$a"
+            fi
+        done
+    fi
     echo -e "$BAR"
 }
 
