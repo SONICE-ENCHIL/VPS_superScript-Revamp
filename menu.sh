@@ -10790,7 +10790,7 @@ client_details_menu() {
     disk_total=$(df -B1 / | awk 'NR==2{print $2}')
     disk_pct=$(awk "BEGIN{printf \"%.0f\", ($disk_used/$disk_total)*100}")
     echo -e "\n   ${C_TITLE}--- SYSTEM INFO ---${C_RESET}"
-    echo -e "   ${C_GRAY}•${C_RESET} Hostname:    ${C_CYAN}$(hostname)${C_RESET}"
+    echo -e "   ${C_GRAY}•${C_RESET} Hostname:    ${C_CYAN}${BANNER_CACHE_DOMAIN:-$(hostname)}${C_RESET}"
     echo -e "   ${C_GRAY}•${C_RESET} Kernel:      ${C_CYAN}$(uname -r)${C_RESET}"
     echo -e "   ${C_GRAY}•${C_RESET} Uptime:      ${C_CYAN}$(uptime -p | sed 's/up //')${C_RESET}"
     echo -e "   ${C_GRAY}•${C_RESET} CPU:         ${C_CYAN}${BANNER_CACHE_CPU_COUNT} cores (load: ${BANNER_CACHE_CPU_LOAD})${C_RESET}"
