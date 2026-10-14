@@ -3316,18 +3316,23 @@ _ff_days_left_color() {
 list_users() {
     clear; show_banner
 
-    # Top decorative header box
-    echo -e "${C_BOLD}${C_PURPLE}╔═══════════════════════════════════════════${C_RESET}"
-    echo -e "  ${C_PURPLE}📋  MANAGED USERS  ${C_RESET}${C_BOLD}═══════════════${C_RESET}"
-    echo -e "${C_BOLD}${C_PURPLE}╚══════════════════════════════════════════${C_RESET}"
+    # Width-aware, centered layout so rules never wrap or distort on small screens.
+    local TW; TW=$(tput cols 2>/dev/null); [[ "$TW" =~ ^[0-9]+$ ]] && (( TW >= 40 )) || TW=80
+    local W=72; (( W > TW - 2 )) && W=$(( TW - 2 ))
+    local LEAD=$(( (TW - W) / 2 )); (( LEAD < 0 )) && LEAD=0
+    local PAD; PAD="$(printf '%*s' "$LEAD" '')"
+    local rule_e rule_d _i; rule_e=""; rule_d=""
+    for ((_i=0;_i<W;_i++)); do rule_e+="═"; rule_d+="─"; done
 
-    # Original separator
-    echo -e "${C_CYAN}=====================================================================================================${C_RESET}"
+    # Top decorative header box (centered)
+    echo -e "${PAD}${C_BOLD}${C_PURPLE}╔${rule_e}╗${C_RESET}"
+    echo -e "${PAD}  ${C_PURPLE}📋  MANAGED USERS${C_RESET}"
+    echo -e "${PAD}${C_BOLD}${C_PURPLE}╚${rule_e}╝${C_RESET}"
 
     # Column headers row
-    printf "${C_BOLD}${C_WHITE}%-18s ${C_RESET}| ${C_YELLOW}%-12s ${C_RESET}| ${C_ORANGE}%-12s ${C_RESET}| ${C_GREEN}%-20s ${C_RESET}\n" \
-            "USERNAME" "STATUS" "HWID" "EXPIRES"
-    echo -e "${C_CYAN}-----------------------------------------------------------------------------------------------------${C_RESET}"
+    printf "%s${C_BOLD}${C_WHITE}%-3s ${C_RESET}| ${C_YELLOW}%-16s ${C_RESET}| ${C_ORANGE}%-12s ${C_RESET}| ${C_GREEN}%-11s ${C_RESET}| ${C_CYAN}%-18s ${C_RESET}\n" \
+            "$PAD" "#" "USERNAME" "STATUS" "HWID" "EXPIRES"
+    echo -e "${PAD}${C_CYAN}${rule_d}${C_RESET}"
 
     if [[ ! -s "$DB_FILE" ]]; then
         echo -e "\n${C_YELLOW}ℹ️ No users are currently being managed.${C_RESET}"
@@ -3356,9 +3361,10 @@ list_users() {
     refresh_ssh_session_cache
 
     local total_users=0 active_count=0 quota_exceeded=0 expired_count=0 locked_hwid=0 paused_count=0
+    local idx=0
 
     while IFS=: read -r user pass expiry limit bandwidth_gb marker user_hwid strict app; do
-        ((total_users++))
+        ((total_users++)); ((idx++))
 
         local online_count="${SSH_SESSION_COUNTS[$user]:-0}"
         local connection_string="$online_count / $limit"
@@ -3491,18 +3497,17 @@ list_users() {
             line_color="$C_YELLOW"
         fi
 
-        printf "${line_color}%-18s ${C_RESET}| ${C_YELLOW}%-12s ${C_RESET}| ${C_ORANGE}%-12s ${C_RESET}${C_RESET}| ${C_GREEN}%-20s ${C_RESET}\n" \
-                "$user" "$status" "$hwid_display" "$expires_display"
+        printf "%s${line_color}%-3s ${C_RESET}| ${line_color}%-16s ${C_RESET}| ${C_YELLOW}%-12s ${C_RESET}| ${C_ORANGE}%-11s ${C_RESET}| ${C_GREEN}%-18s ${C_RESET}\n" \
+                "$PAD" "$idx" "$user" "$status" "$hwid_display" "$expires_display"
     done < <(sort "$DB_FILE")
 
     # Footer stats — 2x2 summary grid
-    echo -e "${C_BOLD}${C_PURPLE}╔══════════════════════════════════════════════════╗${C_RESET}"
-    printf "  ${C_BOLD}📊  SUMMARY${C_RESET}\n"
-    printf "\033[3G%s\033[26G%s\033[K\n" "${C_WHITE}👥 Total: ${total_users}${C_RESET}" "${C_GREEN}🟢 Active: ${active_count}${C_RESET}"
-    printf "\033[3G%s\033[26G%s\033[K\n" "${C_WHITE}📦 Quota: ${quota_exceeded}${C_RESET}" "${C_RED}🗓️ Expired: ${expired_count}${C_RESET}"
-    echo -e "${C_BOLD}${C_PURPLE}╚══════════════════════════════════════════════════╝${C_RESET}"
-
-    echo -e "${C_CYAN}=====================================================================================================${C_RESET}\n"
+    echo -e "${PAD}${C_BOLD}${C_PURPLE}╔${rule_e}╗${C_RESET}"
+    echo -e "${PAD}  ${C_BOLD}📊  SUMMARY${C_RESET}"
+    printf "%s  %s        %s\n" "$PAD" "${C_WHITE}👥 Total: ${total_users}${C_RESET}" "${C_GREEN}🟢 Active: ${active_count}${C_RESET}"
+    printf "%s  %s        %s\n" "$PAD" "${C_WHITE}📦 Quota: ${quota_exceeded}${C_RESET}" "${C_RED}🗓️ Expired: ${expired_count}${C_RESET}"
+    echo -e "${PAD}${C_BOLD}${C_PURPLE}╚${rule_e}╝${C_RESET}"
+    echo ""
 }
 
 renew_user() {
