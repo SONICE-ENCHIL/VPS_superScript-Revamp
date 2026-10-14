@@ -7006,10 +7006,10 @@ _proto_grid() {
         IFS='|' read -r n1 l1 u1 <<<"${_PROTO_LIST[i]}"
         if (( i+1 < total )); then
             IFS='|' read -r n2 l2 u2 <<<"${_PROTO_LIST[i+1]}"
-            printf "\033[3G${C_PURPLE}[${C_GREEN}%s${C_PURPLE}]${C_RESET}\033[9G${C_WARN}⇨${C_RESET} ${C_WHITE}%-20s${C_RESET}%s\033[44G${C_PURPLE}[${C_GREEN}%s${C_PURPLE}]${C_RESET}\033[50G${C_WARN}⇨${C_RESET} ${C_WHITE}%-20s${C_RESET}%s\033[K\n" \
+            printf "\033[3G${C_PURPLE}[${C_GREEN}%s${C_PURPLE}]${C_RESET}\033[9G${C_WARN}⇨${C_RESET} ${C_WHITE}%-18s${C_RESET}%s\033[34G${C_PURPLE}[${C_GREEN}%s${C_PURPLE}]${C_RESET}\033[40G${C_WARN}⇨${C_RESET} ${C_WHITE}%-18s${C_RESET}%s\033[K\n" \
                 "$n1" "$l1" "$(_pstat "$u1")" "$n2" "$l2" "$(_pstat "$u2")"
         else
-            printf "\033[3G${C_PURPLE}[${C_GREEN}%s${C_PURPLE}]${C_RESET}\033[9G${C_WARN}⇨${C_RESET} ${C_WHITE}%-20s${C_RESET}%s\033[K\n" \
+            printf "\033[3G${C_PURPLE}[${C_GREEN}%s${C_PURPLE}]${C_RESET}\033[9G${C_WARN}⇨${C_RESET} ${C_WHITE}%-18s${C_RESET}%s\033[K\n" \
                 "$n1" "$l1" "$(_pstat "$u1")"
         fi
     done
