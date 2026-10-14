@@ -115,6 +115,10 @@ DESEC_DOMAIN="manager.VPS_superScript.qzz.io"
 
 DOMAIN_OVERRIDE_FILE="$DB_DIR/domain_override"
 
+# ── Support / Contact (shown in the banner subtitle) ──
+SUPPORT_EMAIL="skylartecho@gmail.com"
+SUPPORT_TG="@coded_skylartech"
+
 # ── DuckDNS ──
 DUCKDNS_CONFIG_FILE="$DB_DIR/duckdns.conf"
 DUCKDNS_CRON_SCHED="*/5 * * * *"
@@ -6897,6 +6901,7 @@ show_banner() {
 
     echo -e "$BAR"
     echo -e "${C_TITLE}           🦅  SkylarSCRIPT | Premium Edition  🦅${C_RESET}"
+    echo -e "        ${C_YELLOW}📧 ${SUPPORT_EMAIL}${C_RESET}      ${C_CYAN}✈ ${SUPPORT_TG}${C_RESET}"
     echo -e "$BAR"
     echo -e "  $DOT ${C_YELLOW}IP:${C_RESET}      ${C_GRAY}${BANNER_CACHE_IP}${C_RESET}"
     echo -e "  $DOT ${C_YELLOW}S.O:${C_RESET} ${C_WHITE}${BANNER_CACHE_OS_NAME}${C_RESET}   $DOT ${C_YELLOW}Base:${C_RESET} ${C_WHITE}${BANNER_CACHE_BASE}${C_RESET}   $DOT ${C_YELLOW}CPU's:${C_RESET} ${C_WHITE}${BANNER_CACHE_CPU_COUNT}${C_RESET}"
