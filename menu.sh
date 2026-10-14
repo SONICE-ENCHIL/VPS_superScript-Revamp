@@ -3320,7 +3320,7 @@ list_users() {
     # counts ANSI bytes and double-width emojis wrongly — placing each field on
     # a screen column forces perfect vertical alignment and prevents clipping.
     local TW; TW=$(tput cols 2>/dev/null); [[ "$TW" =~ ^[0-9]+$ ]] && (( TW >= 20 )) || TW=80
-    local T=78; (( T > TW )) && T=$TW          # total table width incl. box corners
+    local T=74; (( T > TW )) && T=$TW          # total table width incl. box corners
     local W=$(( T - 2 )); (( W < 20 )) && W=20 # ═ fill width
     local LEAD=$(( (TW - T) / 2 )); (( LEAD < 0 )) && LEAD=0
     local PAD; PAD="$(printf '%*s' "$LEAD" '')"
@@ -3337,14 +3337,14 @@ list_users() {
         "$((LEAD+1))" "${C_BOLD}${C_WHITE}#${C_RESET}" \
         "$((LEAD+4))" "${C_DIM}│${C_RESET}" \
         "$((LEAD+6))" "${C_BOLD}${C_YELLOW}USERNAME${C_RESET}" \
-        "$((LEAD+24))" "${C_DIM}│${C_RESET}" \
-        "$((LEAD+26))" "${C_BOLD}${C_ORANGE}STATUS${C_RESET}" \
-        "$((LEAD+44))" "${C_DIM}│${C_RESET}" \
-        "$((LEAD+46))" "${C_BOLD}${C_GREEN}HWID${C_RESET}" \
-        "$((LEAD+58))" "${C_DIM}│${C_RESET}" \
-        "$((LEAD+60))" "${C_BOLD}${C_BLUE}BW CAP${C_RESET}" \
-        "$((LEAD+66))" "${C_DIM}│${C_RESET}" \
-        "$((LEAD+68))" "${C_BOLD}${C_CYAN}EXPIRES${C_RESET}"
+        "$((LEAD+20))" "${C_DIM}│${C_RESET}" \
+        "$((LEAD+22))" "${C_BOLD}${C_ORANGE}STATUS${C_RESET}" \
+        "$((LEAD+40))" "${C_DIM}│${C_RESET}" \
+        "$((LEAD+42))" "${C_BOLD}${C_GREEN}HWID${C_RESET}" \
+        "$((LEAD+53))" "${C_DIM}│${C_RESET}" \
+        "$((LEAD+55))" "${C_BOLD}${C_BLUE}BW CAP${C_RESET}" \
+        "$((LEAD+62))" "${C_DIM}│${C_RESET}" \
+        "$((LEAD+64))" "${C_BOLD}${C_CYAN}EXPIRES${C_RESET}"
     echo -e "${PAD}${C_CYAN}${rule_d}${C_RESET}"
 
     if [[ ! -s "$DB_FILE" ]]; then
@@ -3529,14 +3529,14 @@ list_users() {
                 "$((LEAD+1))" "${line_color}${idx}${C_RESET}" \
                 "$((LEAD+4))" "${C_DIM}│${C_RESET}" \
                 "$((LEAD+6))" "${line_color}${user}${C_RESET}" \
-                "$((LEAD+24))" "${C_DIM}│${C_RESET}" \
-                "$((LEAD+26))" "${status}" \
-                "$((LEAD+44))" "${C_DIM}│${C_RESET}" \
-                "$((LEAD+46))" "${C_ORANGE}${hwid_display}${C_RESET}" \
-                "$((LEAD+58))" "${C_DIM}│${C_RESET}" \
-                "$((LEAD+60))" "${bw_dot}" \
-                "$((LEAD+66))" "${C_DIM}│${C_RESET}" \
-                "$((LEAD+68))" "${C_GREEN}${expires_display}${C_RESET}"
+                "$((LEAD+20))" "${C_DIM}│${C_RESET}" \
+                "$((LEAD+22))" "${status}" \
+                "$((LEAD+40))" "${C_DIM}│${C_RESET}" \
+                "$((LEAD+42))" "${C_ORANGE}${hwid_display}${C_RESET}" \
+                "$((LEAD+53))" "${C_DIM}│${C_RESET}" \
+                "$((LEAD+55))" "${bw_dot}" \
+                "$((LEAD+62))" "${C_DIM}│${C_RESET}" \
+                "$((LEAD+64))" "${C_GREEN}${expires_display}${C_RESET}"
     done < <(sort "$DB_FILE")
 
     # Footer stats — 2x2 summary grid
