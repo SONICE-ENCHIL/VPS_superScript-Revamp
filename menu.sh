@@ -3322,7 +3322,7 @@ list_users() {
     local TW; TW=$(tput cols 2>/dev/null); [[ "$TW" =~ ^[0-9]+$ ]] && (( TW >= 20 )) || TW=80
     local T=74; (( T > TW )) && T=$TW          # total table width incl. box corners
     local W=$(( T - 2 )); (( W < 20 )) && W=20 # ═ fill width
-    local LEAD=$(( (TW - T) / 2 )); (( LEAD < 0 )) && LEAD=0
+    local LEAD=0                                # centering disabled (left-aligned)
     local PAD; PAD="$(printf '%*s' "$LEAD" '')"
     local rule_e rule_d _i; rule_e=""; rule_d=""
     for ((_i=0;_i<W;_i++)); do rule_e+="═"; rule_d+="─"; done
