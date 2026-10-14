@@ -3318,7 +3318,7 @@ list_users() {
 
     # Width-aware, centered layout so rules never wrap or distort on small screens.
     local TW; TW=$(tput cols 2>/dev/null); [[ "$TW" =~ ^[0-9]+$ ]] && (( TW >= 40 )) || TW=80
-    local W=75; (( W > TW - 2 )) && W=$(( TW - 2 ))
+    local W=72; (( W > TW - 2 )) && W=$(( TW - 2 ))
     local LEAD=$(( (TW - W) / 2 )); (( LEAD < 0 )) && LEAD=0
     local PAD; PAD="$(printf '%*s' "$LEAD" '')"
     local rule_e rule_d _i; rule_e=""; rule_d=""
@@ -3330,8 +3330,8 @@ list_users() {
     echo -e "${PAD}${C_BOLD}${C_PURPLE}╚${rule_e}╝${C_RESET}"
 
     # Column headers row
-    printf "%s${C_BOLD}${C_WHITE}%-2s ${C_RESET}| ${C_YELLOW}%-13s ${C_RESET}| ${C_ORANGE}%-11s ${C_RESET}| ${C_GREEN}%-10s ${C_RESET}| ${C_BLUE}%-12s ${C_RESET}| ${C_CYAN}%-11s ${C_RESET}\n" \
-            "$PAD" "#" "USERNAME" "STATUS" "HWID" "BANDWIDTH" "EXPIRES"
+    printf "%s${C_BOLD}${C_WHITE}%-2s ${C_RESET}| ${C_YELLOW}%-15s ${C_RESET}| ${C_ORANGE}%-11s ${C_RESET}| ${C_GREEN}%-10s ${C_RESET}| ${C_BLUE}%-6s ${C_RESET}| ${C_CYAN}%-12s ${C_RESET}\n" \
+            "$PAD" "#" "USERNAME" "STATUS" "HWID" "BW CAP" "EXPIRES"
     echo -e "${PAD}${C_CYAN}${rule_d}${C_RESET}"
 
     if [[ ! -s "$DB_FILE" ]]; then
@@ -3375,8 +3375,8 @@ list_users() {
         [[ -z "$bandwidth_gb" ]] && bandwidth_gb="0"
         local bw_string; bw_string=$(_ff_quota_label "$bandwidth_gb")
         local quota_bytes; quota_bytes=$(_ff_quota_to_bytes "$bandwidth_gb")
+        local used_bytes=0
         if (( quota_bytes > 0 )); then
-            local used_bytes=0
             if [[ -f "$BANDWIDTH_DIR/${user}.usage" ]]; then
                 read -r used_bytes < "$BANDWIDTH_DIR/${user}.usage" 2>/dev/null || used_bytes=0
                 [[ "$used_bytes" =~ ^[0-9]+$ ]] || used_bytes=0
@@ -3387,6 +3387,19 @@ list_users() {
             if (( used_bytes >= quota_bytes )); then
                 _quota_hit=true
             fi
+        fi
+
+        # BANDWIDTH dot: usage level (left) + cap (right). Level colour:
+        # green <50%, yellow 50-79%, red >=80%, grey = unlimited.
+        local bw_dot
+        if (( quota_bytes <= 0 )); then
+            bw_dot="${C_GRAY}⚪${C_RESET} ${C_BLUE}⦿${C_RESET}"
+        elif (( used_bytes * 10 >= quota_bytes * 8 )); then
+            bw_dot="${C_RED}🔴${C_RESET} ${C_BLUE}⦿${C_RESET}"
+        elif (( used_bytes * 10 >= quota_bytes * 5 )); then
+            bw_dot="${C_YELLOW}🟡${C_RESET} ${C_BLUE}⦿${C_RESET}"
+        else
+            bw_dot="${C_GREEN}🟢${C_RESET} ${C_BLUE}⦿${C_RESET}"
         fi
 
         # HWID Status (emoji + locked/unlocked text)
@@ -3497,8 +3510,8 @@ list_users() {
             line_color="$C_YELLOW"
         fi
 
-        printf "%s${line_color}%-2s ${C_RESET}| ${line_color}%-13s ${C_RESET}| ${C_YELLOW}%-11s ${C_RESET}| ${C_ORANGE}%-10s ${C_RESET}| ${C_BLUE}%-12s ${C_RESET}| ${C_GREEN}%-11s ${C_RESET}\n" \
-                "$PAD" "$idx" "$user" "$status" "$hwid_display" "$bw_string" "$expires_display"
+        printf "%s${line_color}%-2s ${C_RESET}| ${line_color}%-15s ${C_RESET}| ${C_YELLOW}%-11s ${C_RESET}| ${C_ORANGE}%-10s ${C_RESET}| ${C_BLUE}%-6s ${C_RESET}| ${C_GREEN}%-12s ${C_RESET}\n" \
+                "$PAD" "$idx" "$user" "$status" "$hwid_display" "$bw_dot" "$expires_display"
     done < <(sort "$DB_FILE")
 
     # Footer stats — 2x2 summary grid
