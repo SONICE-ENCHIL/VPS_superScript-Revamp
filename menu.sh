@@ -2275,7 +2275,7 @@ create_user() {
             break
         fi
     done
-    read -r -p "🗓️ duration [30d]: " duration_input
+    read -r -p "🗓️ duration (e.g. 20d5h30m · 2h · 30m) [30d]: " duration_input
     duration_input=${duration_input:-30d}
     local duration_secs; duration_secs=$(_ff_dur_to_seconds "$duration_input")
     if [[ "$duration_secs" -le 0 ]]; then echo -e "\n${C_RED}❌ Invalid duration. Use e.g. 30m, 2h, 1d, 2d4h30m.${C_RESET}"; return; fi
@@ -2283,7 +2283,7 @@ create_user() {
     read -r -p "📶 limit [1]: " limit
     limit=${limit:-1}
     if ! [[ "$limit" =~ ^[0-9]+$ ]]; then echo -e "\n${C_RED}❌ Invalid number.${C_RESET}"; return; fi
-    read -r -p "📦 quota [0]: " quota_input
+    read -r -p "📦 quota (GB/MB, e.g. 2GB, 500MB; 0 = unlimited) [0]: " quota_input
     quota_input=${quota_input:-0}
     if ! _ff_quota_valid "$quota_input"; then echo -e "\n${C_RED}❌ Invalid quota. Use e.g. 500MB, 1GB, 10GB.${C_RESET}"; return; fi
     local bandwidth_gb; bandwidth_gb=$(_ff_quota_canonical "$quota_input")
