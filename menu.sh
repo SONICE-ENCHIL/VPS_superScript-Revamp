@@ -6899,10 +6899,21 @@ show_banner() {
     echo -e "${C_TITLE}           🦅  SkylarSCRIPT | Premium Edition  🦅${C_RESET}"
     echo -e "$BAR"
     echo -e "  $DOT ${C_YELLOW}IP:${C_RESET}      ${C_GRAY}${BANNER_CACHE_IP}${C_RESET}"
+    echo -e "  $DOT ${C_YELLOW}S.O:${C_RESET} ${C_WHITE}${BANNER_CACHE_OS_NAME}${C_RESET}   $DOT ${C_YELLOW}Base:${C_RESET} ${C_WHITE}${BANNER_CACHE_BASE}${C_RESET}   $DOT ${C_YELLOW}CPU's:${C_RESET} ${C_WHITE}${BANNER_CACHE_CPU_COUNT}${C_RESET}"
+    # Human uptime as weeks/days/hours (e.g. 24w5d6h) from the kernel uptime.
+    local _up_secs _uw _ud _uh _up_disp=""
+    _up_secs=$(cut -d. -f1 /proc/uptime 2>/dev/null || echo 0)
+    [[ "$_up_secs" =~ ^[0-9]+$ ]] || _up_secs=0
+    _uw=$(( _up_secs / 604800 )); _ud=$(( (_up_secs % 604800) / 86400 )); _uh=$(( (_up_secs % 86400) / 3600 ))
+    (( _uw > 0 )) && _up_disp="${_uw}w"
+    (( _ud > 0 )) && _up_disp="${_up_disp}${_ud}d"
+    (( _uh > 0 )) && _up_disp="${_up_disp}${_uh}h"
+    [[ -z "$_up_disp" ]] && _up_disp="<1h"
+    echo -e "  $DOT ${C_YELLOW}UPTIME:${C_RESET}   ${C_GREEN}${_up_disp}${C_RESET}"
     echo -e "  $DOT ${C_YELLOW}USERS:${C_RESET}   ${C_GREEN}${BANNER_CACHE_TOTAL_USERS} managed · ${BANNER_CACHE_ONLINE_USERS} online · ${BANNER_CACHE_EXPIRED_USERS} expired${C_RESET}"
     echo -e "  $DOT ${C_YELLOW}LOCKS:${C_RESET}   ${C_YELLOW}HWID ${_hwid} · UDP-LOCK ${_ushare}${C_RESET}"
     local _ram_col="$C_GREEN"; awk -v u="${BANNER_CACHE_RAM_USAGE:-0}" 'BEGIN{exit !(u>80)}' && _ram_col="$C_RED"
-    echo -e "  $DOT ${C_YELLOW}STATUS:${C_RESET}  ${C_WHITE}${BANNER_CACHE_UP_TIME} up · load ${_cpu_col}${BANNER_CACHE_CPU_LOAD}${C_RESET} · ${C_GREEN}RAM ${BANNER_CACHE_MEM_USED}/${BANNER_CACHE_MEM_TOTAL}${C_RESET} (${_ram_col}${BANNER_CACHE_RAM_USAGE}%${C_RESET})${C_RESET}"
+    echo -e "  $DOT ${C_YELLOW}STATUS:${C_RESET}  ${C_WHITE}load ${_cpu_col}${BANNER_CACHE_CPU_LOAD}${C_RESET} · ${C_GREEN}RAM ${BANNER_CACHE_MEM_USED}/${BANNER_CACHE_MEM_TOTAL}${C_RESET} (${_ram_col}${BANNER_CACHE_RAM_USAGE}%${C_RESET})${C_RESET}"
 
     local -a svc_lbl=() svc_val=()
     svc_lbl+=("SSH:"); svc_val+=("22")
