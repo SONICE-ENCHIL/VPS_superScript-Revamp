@@ -8895,11 +8895,13 @@ system_hub() {
         _hub_header "⚙️ SYSTEM & SERVER"
         _hub_item "1" "🔄 Auto-Reboot Task"   "Schedule automatic reboots"
         _hub_item "2" "🕐 Timezone"           "Set the server timezone"
+        _hub_item "3" "⬇️ Update Script"      "Fetch latest menu.sh from the repo"
         _hub_footer
         read -r -p "$(echo -e ${C_PROMPT}"👉 Select an option: "${C_RESET})" choice || return
         case $choice in
             1) auto_reboot_menu ;;
             2) timezone_menu; press_enter ;;
+            3) update_script; press_enter ;;
             0) return ;;
             *) invalid_option ;;
         esac
@@ -9515,6 +9517,50 @@ user_control_hub() {
             *) invalid_option ;;
         esac
     done
+}
+
+update_script() {
+    clear; show_banner
+    echo -e "${C_BOLD}${C_PURPLE}--- ⬇️ Update Script ---${C_RESET}"
+
+    # Resolve the live menu binary (follow symlinks) so we update the real file.
+    local dest; dest="$(command -v menu 2>/dev/null)"
+    [[ -z "$dest" ]] && dest="/usr/local/bin/menu"
+    dest="$(readlink -f "$dest" 2>/dev/null || printf '%s' "$dest")"
+
+    local url="$FF_RAW_BASE/menu.sh"
+    echo -e "\n${C_CYAN}Source:${C_RESET} $url"
+    echo -e "\n${C_YELLOW}⬇️  Downloading latest menu.sh…${C_RESET}"
+
+    local tmp
+    tmp=$(mktemp /tmp/skylar_menu.XXXXXX 2>/dev/null) || { echo -e "${C_RED}❌ Could not create temp file.${C_RESET}"; press_enter; return; }
+    if ! curl -fsSL --max-time 60 -o "$tmp" "$url"; then
+        echo -e "${C_RED}❌ Download failed. Check network / repo URL.${C_RESET}"
+        rm -f "$tmp"; press_enter; return
+    fi
+    # Sanity checks: never clobber a good menu with an empty/HTML/JSON body.
+    if [[ ! -s "$tmp" ]]; then
+        echo -e "${C_RED}❌ Downloaded file is empty. Update aborted (menu untouched).${C_RESET}"
+        rm -f "$tmp"; press_enter; return
+    fi
+    if ! head -n1 "$tmp" | grep -q '^#!'; then
+        echo -e "${C_RED}❌ File is not a valid script (no shebang). Update aborted.${C_RESET}"
+        rm -f "$tmp"; press_enter; return
+    fi
+
+    local lines; lines=$(wc -l < "$tmp")
+    local ts; ts=$(date +%Y%m%d-%H%M%S)
+    if [[ -f "$dest" ]]; then
+        cp -a "$dest" "${dest}.bak.${ts}" 2>/dev/null && echo -e "${C_DIM}📦 Backup saved: ${dest}.bak.${ts}${C_RESET}"
+    fi
+    if ! install -m 0755 "$tmp" "$dest" 2>/dev/null; then
+        cp -f "$tmp" "$dest" && chmod +x "$dest"
+    fi
+    rm -f "$tmp"
+
+    echo -e "\n${C_GREEN}✅ Update complete! menu.sh updated (${lines} lines).${C_RESET}"
+    echo -e "${C_DIM}Re-run 'menu' (or type menu) to load the new version.${C_RESET}"
+    press_enter
 }
 
 main_menu() {
