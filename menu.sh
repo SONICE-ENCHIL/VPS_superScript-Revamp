@@ -6920,63 +6920,43 @@ show_banner() {
     local _ram_col="$C_GREEN"; awk -v u="${BANNER_CACHE_RAM_USAGE:-0}" 'BEGIN{exit !(u>80)}' && _ram_col="$C_RED"
     echo -e "  $DOT ${C_YELLOW}STATUS:${C_RESET}  ${C_WHITE}load ${_cpu_col}${BANNER_CACHE_CPU_LOAD}${C_RESET} · ${C_GREEN}RAM ${BANNER_CACHE_MEM_USED}/${BANNER_CACHE_MEM_TOTAL}${C_RESET} (${_ram_col}${BANNER_CACHE_RAM_USAGE}%${C_RESET})${C_RESET}"
 
-    local -a svc_lbl=() svc_val=()
-    svc_lbl+=("SSH:"); svc_val+=("22")
-    if systemctl is-active --quiet haproxy; then
-        svc_lbl+=("SSL (HAProxy):"); svc_val+=("${EDGE_PUBLIC_HTTP_PORT:-80}, ${EDGE_PUBLIC_TLS_PORT:-443}")
-    fi
-    if systemctl is-active --quiet zivpn.service; then
-        svc_lbl+=("ZiVPN:"); svc_val+=("${ZIVPN_LISTEN_PORT:-5667}")
-    fi
-    if systemctl is-active --quiet udp-custom; then
-        svc_lbl+=("UDP-Custom:"); svc_val+=("${UDP_CUSTOM_LISTEN_PORT:-36712}")
-    fi
-    if systemctl is-active --quiet badvpn; then
-        svc_lbl+=("BadVPN:"); svc_val+=("${BADVPN_LISTEN_PORT:-7300}")
-    fi
-    if systemctl is-active --quiet dnstt.service; then
-        svc_lbl+=("DNSTT:"); svc_val+=("53")
-    fi
-    if systemctl is-active --quiet nginx; then
-        svc_lbl+=("Nginx Int.:"); svc_val+=("${NGINX_INTERNAL_HTTP_PORT:-8880}, ${NGINX_INTERNAL_TLS_PORT:-8443}")
-    fi
-    if systemctl is-active --quiet dropbear; then
-        svc_lbl+=("Dropbear:"); svc_val+=("${DROPBEAR_PORTS}")
-    fi
-    if systemctl is-active --quiet openvpn@server-tcp; then
-        svc_lbl+=("OpenVPN:"); svc_val+=("${OPENVPN_TCP_PORT}, ${OPENVPN_UDP_PORT}")
-    fi
-    if systemctl is-active --quiet wg-quick@wg0; then
-        svc_lbl+=("WireGuard:"); svc_val+=("${WIREGUARD_PORT}")
-    fi
-    if systemctl is-active --quiet hysteria-server; then
-        svc_lbl+=("Hysteria:"); svc_val+=("${HYSTERIA1_PORT}/${HYSTERIA2_PORT}")
-    fi
-    if systemctl is-active --quiet shadowsocks-libev; then
-        svc_lbl+=("ShadowSocks:"); svc_val+=("${SHADOWSOCKS_PORT}")
-    fi
-    if systemctl is-active --quiet danted; then
-        svc_lbl+=("Socks5:"); svc_val+=("${SOCKS5_PORT}")
-    fi
-    if systemctl is-active --quiet stunnel4; then
-        svc_lbl+=("Stunnel:"); svc_val+=("${STUNNEL_PORT}")
-    fi
-    if [[ -f /etc/systemd/system/rest-api.service ]] && systemctl is-active --quiet rest-api; then
-        svc_lbl+=("Rest API:"); svc_val+=("${REST_API_PORT}")
-    fi
-    if systemctl is-active --quiet ws-ssh; then
-        local ws_resp=$(grep -oP '^RESPONSE="\K[^"]*' "$WS_SSH_CONFIG_FILE" 2>/dev/null || echo "101")
-        svc_lbl+=("WS-SSH:"); svc_val+=("${WS_SSH_INTERNAL_PORT} [${ws_resp}]")
-    fi
+    # Port roster with live status dots: green=up, red=down. Only services that
+    # are actually present (active or installed) are listed.
+    _port_present() {
+        systemctl is-active --quiet "$1" 2>/dev/null && return 0
+        systemctl list-unit-files "$1" 2>/dev/null | grep -q "^[[:space:]]*$1" && return 2
+        return 1
+    }
+    local -a p_ent=()
+    _add_port() {  # label unit value
+        _port_present "$2"; local st=$?
+        (( st == 1 )) && return 0
+        local dot="${C_GREEN}🟢${C_RESET}" disp="$3"
+        (( st == 2 )) && { dot="${C_RED}🔴${C_RESET}"; disp="down"; }
+        p_ent+=("${dot} ${C_ORANGE}$1 ${disp}${C_RESET}")
+    }
+    _add_port "SSH"         "ssh"                "22"
+    _add_port "ZiVPN"       "zivpn.service"      "${ZIVPN_LISTEN_PORT:-5667}"
+    _add_port "UDP-Custom"  "udp-custom"         "${UDP_CUSTOM_LISTEN_PORT:-36712}"
+    _add_port "BadVPN"      "badvpn"             "${BADVPN_LISTEN_PORT:-7300}"
+    _add_port "DNSTT"       "dnstt.service"      "53"
+    _add_port "Dropbear"    "dropbear"           "${DROPBEAR_PORTS:-109,143}"
+    _add_port "Nginx"       "nginx"              "${NGINX_INTERNAL_HTTP_PORT:-8880}/${NGINX_INTERNAL_TLS_PORT:-8443}"
+    _add_port "OpenVPN"     "openvpn@server-tcp" "${OPENVPN_TCP_PORT:-1194}"
+    _add_port "WireGuard"   "wg-quick@wg0"       "${WIREGUARD_PORT:-51820}"
+    _add_port "Hysteria"    "hysteria-server"    "${HYSTERIA2_PORT:-20001}"
+    _add_port "ShadowSocks" "shadowsocks-libev"  "${SHADOWSOCKS_PORT:-2443}"
+    _add_port "Socks5"      "danted"             "${SOCKS5_PORT:-1080}"
+    _add_port "Stunnel"     "stunnel4"           "${STUNNEL_PORT:-777}"
+    _add_port "WS-SSH"      "ws-ssh"             "${WS_SSH_INTERNAL_PORT:-2080}"
     
-    local i total=${#svc_lbl[@]}
+    local pi a b; local total=${#p_ent[@]}
     if (( total > 0 )); then
         echo -e "  $DOT ${C_YELLOW}PORTS:${C_RESET}"
-        local pi a b
         for ((pi=0; pi<total; pi+=2)); do
-            a="${C_ORANGE}${svc_lbl[pi]%:} ${svc_val[pi]}${C_RESET}"
+            a="${p_ent[pi]}"
             b=""
-            (( pi+1 < total )) && b="${C_ORANGE}${svc_lbl[pi+1]%:} ${svc_val[pi+1]}${C_RESET}"
+            (( pi+1 < total )) && b="${p_ent[pi+1]}"
             if [[ -n "$b" ]]; then
                 printf '\033[13G%s\033[41G%s\033[K\n' "$a" "$b"
             else
