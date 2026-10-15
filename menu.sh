@@ -65,6 +65,7 @@ LIMITER_SERVICE="/etc/systemd/system/VPS_superScript-limiter.service"
 BANDWIDTH_DIR="$DB_DIR/bandwidth"
 BACKUP_DIR="/root/VPS_superScript_backups"
 TRIAL_EXPIRY_DIR="$DB_DIR/trials"
+CREATED_DIR="$DB_DIR/created"
 BANDWIDTH_SCRIPT="/usr/local/bin/VPS_superScript-bandwidth.sh"
 BANDWIDTH_SERVICE="/etc/systemd/system/VPS_superScript-bandwidth.service"
 LEGACY_BANDWIDTH_DIR="/usr/local/bin/VPS_superScript-bandwidth"
@@ -687,7 +688,7 @@ migrate_from_skylartech() {
 }
 
 ensure_VPS_superScript_dirs() {
-    mkdir -p "$DB_DIR" "$SSL_CERT_DIR" "$BANDWIDTH_DIR" "$TRIAL_EXPIRY_DIR" /etc/ssh/sshd_config.d
+    mkdir -p "$DB_DIR" "$SSL_CERT_DIR" "$BANDWIDTH_DIR" "$TRIAL_EXPIRY_DIR" "$CREATED_DIR" /etc/ssh/sshd_config.d
     touch "$DB_FILE"
 }
 
@@ -1069,6 +1070,7 @@ delete_VPS_superScript_user_accounts() {
         rm -f "$BANDWIDTH_DIR/${username}.usage"
         rm -rf "$BANDWIDTH_DIR/pidtrack/${username}"
         rm -f "$TRIAL_EXPIRY_DIR/${username}.ts"
+        rm -f "$CREATED_DIR/${username}"
         rm -f "$ZIVPN_LOCK_DIR/${username}"
     done
 
@@ -2348,6 +2350,8 @@ create_user() {
     # Fields: user:pass:expiry:limit:bw:marker:hwid:strict
     # 6th field is the account marker: empty = normal account, "trial" = auto-expiring trial.
     echo "$username:$password:$expire_date:$limit:$bandwidth_gb::$hwid:$strict:$app" >> "$DB_FILE"
+    # Record creation time shown in User Details (falls back to home-dir date if absent).
+    mkdir -p "$CREATED_DIR"; printf '%s\n' "$(date +%s)" > "$CREATED_DIR/${username}"
     # Precise expiry timestamp so sub-day durations end on time; the limiter
     # locks a normal account (and deletes a trial) when this epoch passes.
     mkdir -p "$TRIAL_EXPIRY_DIR"
@@ -2569,11 +2573,21 @@ view_user_details() {
         socks5)      app_display="${C_CYAN}SOCKS5${C_RESET}" ;;
     esac
 
+    # Creation date (tracked file; fallback to home-dir mtime for older accounts).
+    local created_date="—"
+    if [[ -f "$CREATED_DIR/${username}" ]]; then
+        local _cts=0; read -r _cts < "$CREATED_DIR/${username}" 2>/dev/null || _cts=0
+        [[ "$_cts" =~ ^[0-9]+$ ]] && created_date=$(date -d "@$_cts" +"%Y-%m-%d %H:%M")
+    elif [[ -d "/home/${username}" ]]; then
+        created_date=$(stat -c '%y' "/home/${username}" 2>/dev/null | cut -d'.' -f1)
+    fi
+
     echo
     echo -e "  ${C_DIM}Field${C_RESET}               ${C_DIM}Value${C_RESET}"
     echo -e "  ${C_GREEN}──────────────────────────────────────────${C_RESET}"
     echo -e "  👤 ${C_BOLD}Username${C_RESET}:        ${C_YELLOW}$username${C_RESET}"
     echo -e "  🔑 ${C_BOLD}Password${C_RESET}:        ${C_YELLOW}$cur_pass${C_RESET}"
+    echo -e "  📅 ${C_BOLD}Created${C_RESET}:        ${C_YELLOW}$created_date${C_RESET}"
     echo -e "  🗓️ ${C_BOLD}Expires${C_RESET}:         ${C_YELLOW}$cur_expiry${C_RESET}  (${_days_color}${_days_str} left${C_RESET})"
     echo -e "  📶 ${C_BOLD}Conn Limit${C_RESET}:      ${C_YELLOW}$cur_limit${C_RESET}"
     echo -e "  📦 ${C_BOLD}BW Limit${C_RESET}:        ${C_YELLOW}$bw_display${C_RESET}"
@@ -7393,6 +7407,7 @@ create_trial_account() {
     fi
     chage -E "$expire_date" "$username"
     echo "$username:$password:$expire_date:$limit:$bandwidth_gb:trial::0:$app" >> "$DB_FILE"
+    mkdir -p "$CREATED_DIR"; printf '%s\n' "$(date +%s)" > "$CREATED_DIR/${username}"
 
     if [[ "$app" == "zivpn" ]]; then
         if ! command -v jq &>/dev/null; then
@@ -7615,6 +7630,7 @@ bulk_create_users() {
         fi
         chage -E "$expire_date" "$username"
         echo "$username:$password:$expire_date:$limit:$bandwidth_gb:::0:$app" >> "$DB_FILE"
+        mkdir -p "$CREATED_DIR"; printf '%s\n' "$(date +%s)" > "$CREATED_DIR/${username}"
         mkdir -p "$TRIAL_EXPIRY_DIR"
         printf '%s\n' "$(( $(date +%s) + duration_secs ))" > "$TRIAL_EXPIRY_DIR/${username}.ts"
         if [[ "$app" == "zivpn" ]]; then
