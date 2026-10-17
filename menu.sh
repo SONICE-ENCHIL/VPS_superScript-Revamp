@@ -136,6 +136,15 @@ SHADOWSOCKS_PORT="2443"
 SOCKS5_PORT="1080"
 STUNNEL_PORT="777"
 
+# ── WS-SSH (WebSocket -> SSH bridge) ──
+# These were referenced by install_ws_ssh, uninstall_ws_ssh, the port manager
+# and the status grid, but never defined: the heredocs below wrote to an empty
+# path, no unit was created, and every call still announced "installed".
+WS_SSH_INTERNAL_PORT="2080"
+WS_SSH_SCRIPT="/usr/local/bin/VPS_superScript-ws-ssh.py"
+WS_SSH_SERVICE="/etc/systemd/system/ws-ssh.service"
+WS_SSH_CONFIG_FILE="$DB_DIR/ws_ssh_config.conf"
+
 # ── Service Info Database (for Service Info menu) ──
 SERVICE_INFO_DB=(
   "SSH:OpenSSH server for secure shell access. Default: 22. Conflicts: none."
@@ -457,6 +466,43 @@ ff_pkg_is_installed() {
         zypper) rpm -q "$pkg" &>/dev/null ;;
         pacman) pacman -Q "$pkg" &>/dev/null ;;
     esac
+}
+
+# Enable a unit, (re)start it, and verify it actually came up. Every protocol
+# installer used to print "✅ installed" and leave the truth to the status grid,
+# which showed a red dot next to a protocol the user had just been told was
+# fine. This makes the installer the single place that decides success.
+# Usage: ff_service_up <unit> <label> [verify-seconds]
+# Returns 0 only when `systemctl is-active` says the unit is running.
+ff_service_up() {
+    local unit="$1" label="${2:-$1}" wait_s="${3:-2}"
+    systemctl daemon-reload >/dev/null 2>&1
+    # Clear a latched "failed" state; without this a unit that failed once keeps
+    # reporting failed even after the cause is fixed.
+    systemctl reset-failed "$unit" >/dev/null 2>&1
+    systemctl enable "$unit" >/dev/null 2>&1
+    systemctl restart "$unit" >/dev/null 2>&1
+    sleep "$wait_s"
+    if systemctl is-active --quiet "$unit" 2>/dev/null; then
+        return 0
+    fi
+    echo -e "\n${C_RED}❌ ${label} failed to start.${C_RESET}"
+    echo -e "${C_YELLOW}ℹ️ Last 15 log lines for ${unit}:${C_RESET}"
+    journalctl -u "$unit" -n 15 --no-pager 2>/dev/null
+    return 1
+}
+
+# The units are already on disk, so the installer can only report "already
+# installed". It used to just `return`, which left a stopped (or crash-looping)
+# service exactly as it was — the user reinstalled and still saw a red dot.
+# This restarts and reports the real state instead.
+# Usage: ff_service_kick <unit> <label>
+ff_service_kick() {
+    local unit="$1" label="${2:-$1}"
+    echo -e "\n${C_BLUE}▶️ Bringing ${label} up...${C_RESET}"
+    if ff_service_up "$unit" "$label" 2; then
+        echo -e "${C_GREEN}✅ ${label} is active.${C_RESET}"
+    fi
 }
 
 # Download a binary and verify it actually is an executable, not an HTML/JSON
@@ -3908,6 +3954,8 @@ install_udp_custom() {
     echo -e "${C_BOLD}${C_PURPLE}--- 🚀 Installing udp-custom ---${C_RESET}"
     if [ -f "$UDP_CUSTOM_SERVICE_FILE" ] || [ -f "$UDPGW_SERVICE_FILE" ]; then
         echo -e "\n${C_YELLOW}ℹ️ udp-custom is already installed.${C_RESET}"
+        ff_service_kick udpgw "udpgw backend"
+        ff_service_kick udp-custom "udp-custom"
         return
     fi
 
@@ -4062,19 +4110,13 @@ WantedBy=multi-user.target
 EOF
 
     echo -e "\n${C_GREEN}▶️ Enabling and starting udp-custom service...${C_RESET}"
-    systemctl daemon-reload
-    systemctl enable udpgw.service
-    systemctl start udpgw.service
-    systemctl enable udp-custom.service
-    systemctl start udp-custom.service
-    sleep 2
-    if systemctl is-active --quiet udpgw && systemctl is-active --quiet udp-custom; then
+    # Delegate to the verified helper chain: enable + restart + is-active check,
+    # instead of two bare `start` calls whose failure was only inspected after.
+    local _udp_ok=true
+    ff_service_up udpgw.service "udpgw backend" 2 || _udp_ok=false
+    ff_service_up udp-custom.service "udp-custom" 2 || _udp_ok=false
+    if $_udp_ok; then
         echo -e "\n${C_GREEN}✅ SUCCESS: udp-custom is installed and active.${C_RESET}"
-    else
-        echo -e "\n${C_RED}❌ ERROR: udp-custom service failed to start.${C_RESET}"
-        echo -e "${C_YELLOW}ℹ️ Displaying last 15 lines of the udp-custom and udpgw logs for diagnostics:${C_RESET}"
-        journalctl -u udp-custom.service -n 15 --no-pager
-        journalctl -u udpgw.service -n 15 --no-pager
     fi
 }
 
@@ -4224,6 +4266,7 @@ install_badvpn() {
     echo -e "${C_BOLD}${C_PURPLE}--- 🚀 Installing badvpn (udpgw) ---${C_RESET}"
     if [ -f "$BADVPN_SERVICE_FILE" ]; then
         echo -e "\n${C_YELLOW}ℹ️ badvpn is already installed.${C_RESET}"
+        ff_service_kick badvpn "badvpn"
         return
     fi
     check_and_open_firewall_port 7300 udp || return
@@ -4311,16 +4354,8 @@ StandardError=null
 WantedBy=multi-user.target
 EOF
     echo -e "\n${C_GREEN}▶️ Enabling and starting badvpn service...${C_RESET}"
-    systemctl daemon-reload
-    systemctl enable badvpn.service
-    systemctl start badvpn.service
-    sleep 2
-    if systemctl is-active --quiet badvpn; then
+    if ff_service_up badvpn "badvpn (udpgw)" 2; then
         echo -e "\n${C_GREEN}✅ SUCCESS: badvpn (udpgw) is installed and active on port 7300.${C_RESET}"
-    else
-        echo -e "\n${C_RED}❌ ERROR: badvpn service failed to start.${C_RESET}"
-        echo -e "${C_YELLOW}ℹ️ Displaying last 15 lines of the service log for diagnostics:${C_RESET}"
-        journalctl -u badvpn.service -n 15 --no-pager
     fi
 }
 
@@ -4517,7 +4552,7 @@ select_edge_certificate() {
     load_edge_cert_info
 
     echo -e "\n${C_BOLD}${C_PURPLE}--- 🔐 Shared TLS Certificate ---${C_RESET}"
-    echo -e "${C_DIM}The same certificate will be used by HAProxy and the internal Nginx proxy.${C_RESET}"
+    echo -e "${C_DIM}The same certificate will be used by the internal Nginx proxy and the services behind it.${C_RESET}"
 
     if $has_existing_cert; then
         local existing_label="${EDGE_CERT_MODE:-existing}"
@@ -4684,11 +4719,6 @@ EOF
     ln -sf "$NGINX_CONFIG_FILE" /etc/nginx/sites-enabled/default
 }
 
-write_haproxy_edge_config() {
-    # HAProxy edge stack removed — no-op (protocol stripped from the panel).
-    :
-}
-
 save_edge_ports_info() {
     cat > "$NGINX_PORTS_FILE" <<EOF
 EDGE_HTTP_PORT="${EDGE_PUBLIC_HTTP_PORT}"
@@ -4707,9 +4737,6 @@ configure_edge_stack() {
     echo -e "\n${C_BLUE}📝 Writing internal Nginx config (127.0.0.1:${NGINX_INTERNAL_HTTP_PORT}/${NGINX_INTERNAL_TLS_PORT})...${C_RESET}"
     write_internal_nginx_config "$server_name"
 
-    echo -e "${C_BLUE}📝 Writing HAProxy edge config (${EDGE_PUBLIC_HTTP_PORT}/${EDGE_PUBLIC_TLS_PORT})...${C_RESET}"
-    write_haproxy_edge_config
-
     echo -e "\n${C_BLUE}🧪 Validating Nginx configuration...${C_RESET}"
     if ! nginx -t >/dev/null 2>&1; then
         echo -e "${C_RED}❌ Nginx configuration validation failed.${C_RESET}"
@@ -4717,40 +4744,12 @@ configure_edge_stack() {
         return 1
     fi
 
-    echo -e "${C_BLUE}🧪 Validating HAProxy configuration...${C_RESET}"
-    if ! haproxy -c -f "$HAPROXY_CONFIG" >/dev/null 2>&1; then
-        echo -e "${C_RED}❌ HAProxy configuration validation failed.${C_RESET}"
-        haproxy -c -f "$HAPROXY_CONFIG"
-        return 1
-    fi
-
     systemctl daemon-reload
     systemctl enable nginx >/dev/null 2>&1
-    systemctl enable haproxy >/dev/null 2>&1
 
     echo -e "\n${C_BLUE}▶️ Restarting internal Nginx...${C_RESET}"
-    systemctl restart nginx || {
-        echo -e "${C_RED}❌ Nginx failed to restart.${C_RESET}"
+    if ! ff_service_up nginx "Nginx" 2; then
         systemctl status nginx --no-pager
-        return 1
-    }
-
-    echo -e "${C_BLUE}▶️ Restarting HAProxy edge...${C_RESET}"
-    systemctl restart haproxy || {
-        echo -e "${C_RED}❌ HAProxy failed to restart.${C_RESET}"
-        systemctl status haproxy --no-pager
-        return 1
-    }
-
-    sleep 2
-    if ! systemctl is-active --quiet nginx; then
-        echo -e "${C_RED}❌ Nginx is not active after restart.${C_RESET}"
-        systemctl status nginx --no-pager
-        return 1
-    fi
-    if ! systemctl is-active --quiet haproxy; then
-        echo -e "${C_RED}❌ HAProxy is not active after restart.${C_RESET}"
-        systemctl status haproxy --no-pager
         return 1
     fi
 
@@ -4758,97 +4757,19 @@ configure_edge_stack() {
     return 0
 }
 
-install_ssl_tunnel() {
-    clear; show_banner
-    echo -e "${C_BOLD}${C_PURPLE}--- 🚀 Installing HAProxy Edge Stack (80/443 -> 8880/8443) ---${C_RESET}"
-    echo -e "\n${C_CYAN}This installer will configure:${C_RESET}"
-    echo -e "   • HAProxy on ${C_WHITE}${EDGE_PUBLIC_HTTP_PORT}/${EDGE_PUBLIC_TLS_PORT}${C_RESET}"
-    echo -e "   • Internal Nginx on ${C_WHITE}${NGINX_INTERNAL_HTTP_PORT}/${NGINX_INTERNAL_TLS_PORT}${C_RESET}"
-    echo -e "   • Loopback SSL decryptor on ${C_WHITE}${HAPROXY_INTERNAL_DECRYPT_PORT}${C_RESET}"
-
-    if [ -f "$HAPROXY_CONFIG" ] || [ -f "$NGINX_CONFIG_FILE" ]; then
-        echo -e "\n${C_YELLOW}⚠️ Existing HAProxy/Nginx configs will be replaced with the VPS_superScript edge layout.${C_RESET}"
-        read -p "👉 Continue with the replacement? (y/n): " confirm_replace
-        if [[ "$confirm_replace" != "y" && "$confirm_replace" != "Y" ]]; then
-            echo -e "${C_RED}❌ Installation cancelled.${C_RESET}"
-            return
-        fi
-    fi
-
-    mkdir -p "$DB_DIR" "$SSL_CERT_DIR"
-
-    ensure_edge_stack_packages || return
-
+cleanup_legacy_haproxy() {
+    # Legacy cleanup, kept only for machines that ran an older release with the
+    # HAProxy edge. Strips the leftover unit and config without touching the
+    # Nginx proxy that replaced it.
+    echo -e "\n${C_BOLD}${C_PURPLE}--- 🗑️ Removing leftover HAProxy edge ---${C_RESET}"
     systemctl stop haproxy >/dev/null 2>&1
-    systemctl stop nginx >/dev/null 2>&1
-    sleep 1
-
-    check_and_free_ports \
-        "$EDGE_PUBLIC_HTTP_PORT" \
-        "$EDGE_PUBLIC_TLS_PORT" \
-        "$NGINX_INTERNAL_HTTP_PORT" \
-        "$NGINX_INTERNAL_TLS_PORT" \
-        "$HAPROXY_INTERNAL_DECRYPT_PORT" || return
-
-    check_and_open_firewall_port "$EDGE_PUBLIC_HTTP_PORT" tcp || return
-    check_and_open_firewall_port "$EDGE_PUBLIC_TLS_PORT" tcp || return
-
-    select_edge_certificate || return
-
-    load_edge_cert_info
-    local server_name="${EDGE_DOMAIN:-$(detect_preferred_host)}"
-    [[ -z "$server_name" ]] && server_name="_"
-
-    configure_edge_stack "$server_name" || return
-
-    echo -e "\n${C_GREEN}✅ SUCCESS: HAProxy edge stack is active.${C_RESET}"
-    echo -e "   • Public edge ports: ${C_YELLOW}${EDGE_PUBLIC_HTTP_PORT}/${EDGE_PUBLIC_TLS_PORT}${C_RESET}"
-    echo -e "   • Internal Nginx ports: ${C_YELLOW}${NGINX_INTERNAL_HTTP_PORT}/${NGINX_INTERNAL_TLS_PORT}${C_RESET}"
-    echo -e "   • Shared certificate: ${C_YELLOW}${EDGE_CERT_MODE:-unknown}${C_RESET}"
-}
-
-uninstall_ssl_tunnel() {
-    echo -e "\n${C_BOLD}${C_PURPLE}--- 🗑️ Uninstalling HAProxy Edge Stack ---${C_RESET}"
-    if ! command -v haproxy &> /dev/null; then
-        echo -e "${C_YELLOW}ℹ️ HAProxy is not installed, skipping service removal.${C_RESET}"
-    else
-        echo -e "${C_GREEN}🛑 Stopping and disabling HAProxy...${C_RESET}"
-        systemctl stop haproxy >/dev/null 2>&1
-        systemctl disable haproxy >/dev/null 2>&1
+    systemctl disable haproxy >/dev/null 2>&1
+    rm -f /etc/systemd/system/haproxy.service /lib/systemd/system/haproxy.service 2>/dev/null
+    if [ -f /etc/haproxy/haproxy.cfg ]; then
+        rm -f /etc/haproxy/haproxy.cfg 2>/dev/null
     fi
-
-    if [ -f "$HAPROXY_CONFIG" ]; then
-        cat > "$HAPROXY_CONFIG" <<EOF
-global
-    log /dev/log local0
-    log /dev/log local1 notice
-
-defaults
-    log     global
-EOF
-    fi
-
-    local delete_cert="n"
-    if [[ "$UNINSTALL_MODE" == "silent" ]]; then
-        delete_cert="y"
-    elif [ -f "$SSL_CERT_FILE" ] || [ -f "$SSL_CERT_CHAIN_FILE" ] || [ -f "$SSL_CERT_KEY_FILE" ]; then
-        if systemctl is-active --quiet nginx; then
-            echo -e "${C_YELLOW}⚠️ The shared certificate is also used by the internal Nginx proxy.${C_RESET}"
-        fi
-        read -p "👉 Delete the shared TLS certificate too? (y/n): " delete_cert
-    fi
-
-    if [[ "$delete_cert" == "y" || "$delete_cert" == "Y" ]]; then
-        if systemctl is-active --quiet nginx; then
-            echo -e "${C_GREEN}🛑 Stopping Nginx because the shared certificate is being removed...${C_RESET}"
-            systemctl stop nginx >/dev/null 2>&1
-        fi
-        rm -f "$SSL_CERT_FILE" "$SSL_CERT_CHAIN_FILE" "$SSL_CERT_KEY_FILE" "$EDGE_CERT_INFO_FILE"
-        rm -f "$NGINX_PORTS_FILE"
-        echo -e "${C_GREEN}🗑️ Shared certificate files removed.${C_RESET}"
-    fi
-
-    echo -e "${C_GREEN}✅ HAProxy edge stack has been removed.${C_RESET}"
+    systemctl daemon-reload >/dev/null 2>&1
+    echo -e "${C_GREEN}✅ HAProxy edge removed.${C_RESET}"
     if systemctl is-active --quiet nginx; then
         echo -e "${C_DIM}The internal Nginx proxy is still installed on ${NGINX_INTERNAL_HTTP_PORT}/${NGINX_INTERNAL_TLS_PORT}.${C_RESET}"
     fi
@@ -4892,6 +4813,7 @@ install_dnstt() {
     echo -e "${C_BOLD}${C_PURPLE}--- 📡 DNSTT (DNS Tunnel) Management ---${C_RESET}"
     if [ -f "$DNSTT_SERVICE_FILE" ]; then
         echo -e "\n${C_YELLOW}ℹ️ DNSTT is already installed.${C_RESET}"
+        ff_service_kick dnstt.service "DNSTT"
         show_dnstt_details
         return
     fi
@@ -5118,16 +5040,11 @@ EOF
             _reload_udp_custom_service
         fi
     fi
-    systemctl daemon-reload
-    systemctl enable dnstt.service
-    systemctl start dnstt.service
-    sleep 2
-    if systemctl is-active --quiet dnstt.service; then
+    # Port 53 may take a moment to be released by systemd-resolved, so allow a
+    # longer verify window than the usual 2s before calling this a failure.
+    if ff_service_up dnstt.service "DNSTT" 3; then
         echo -e "\n${C_GREEN}✅ SUCCESS: DNSTT has been installed and started!${C_RESET}"
         show_dnstt_details
-    else
-        echo -e "\n${C_RED}❌ ERROR: DNSTT service failed to start.${C_RESET}"
-        journalctl -u dnstt.service -n 15 --no-pager
     fi
 }
 
@@ -5190,7 +5107,10 @@ install_falcon_proxy() {
             echo -e "   Installed Version: ${C_YELLOW}${INSTALLED_VERSION:-Unknown}${C_RESET}"
         fi
         read -p "👉 Do you want to reinstall/update? (y/n): " confirm_reinstall
-        if [[ "$confirm_reinstall" != "y" ]]; then return; fi
+        if [[ "$confirm_reinstall" != "y" ]]; then
+            ff_service_kick falconproxy.service "Falcon Proxy"
+            return
+        fi
     fi
 
     echo -e "\n${C_BLUE}🌐 Fetching available versions from $FF_REPO_HOST...${C_RESET}"
@@ -5295,18 +5215,9 @@ INSTALLED_VERSION="$SELECTED_VERSION"
 EOF
 
     echo -e "\n${C_GREEN}▶️ Enabling and starting Falcon Proxy service...${C_RESET}"
-    systemctl daemon-reload
-    systemctl enable falconproxy.service
-    systemctl restart falconproxy.service
-    sleep 2
-    
-    if systemctl is-active --quiet falconproxy; then
+    if ff_service_up falconproxy.service "Falcon Proxy" 2; then
         echo -e "\n${C_GREEN}✅ SUCCESS: Falcon Proxy $SELECTED_VERSION is installed and active.${C_RESET}"
         echo -e "   Listening on port(s): ${C_YELLOW}$ports${C_RESET}"
-    else
-        echo -e "\n${C_RED}❌ ERROR: Falcon Proxy service failed to start.${C_RESET}"
-        echo -e "${C_YELLOW}ℹ️ Displaying last 15 lines of the service log for diagnostics:${C_RESET}"
-        journalctl -u falconproxy.service -n 15 --no-pager
     fi
 }
 
@@ -5335,6 +5246,7 @@ install_zivpn() {
     
     if [ -f "$ZIVPN_SERVICE_FILE" ]; then
         echo -e "\n${C_YELLOW}ℹ️ ZiVPN is already installed.${C_RESET}"
+        ff_service_kick zivpn.service "ZiVPN"
         return
     fi
 
@@ -5475,9 +5387,8 @@ EOF
     fi
 
     echo -e "\n${C_GREEN}🚀 Starting ZiVPN Service...${C_RESET}"
-    systemctl daemon-reload
-    systemctl enable zivpn.service
-    systemctl start zivpn.service
+    local _zivpn_ok=true
+    ff_service_up zivpn.service "ZiVPN" 2 || _zivpn_ok=false
 
     # Port Forwarding / Firewall
     echo -e "${C_BLUE}🔥 Configuring Firewall Rules (ZiVPN on UDP 5667, forwarded from 6000-19999)...${C_RESET}"
@@ -5491,12 +5402,10 @@ EOF
     # Cleanup
     rm -f zi.sh zi2.sh 2>/dev/null
 
-    if systemctl is-active --quiet zivpn.service; then
+    if $_zivpn_ok; then
         echo -e "\n${C_GREEN}✅ ZiVPN Installed Successfully!${C_RESET}"
         echo -e "   - UDP Port: 5667 (Direct)"
         echo -e "   - UDP Ports: 6000-19999 (Forwarded → 5667)"
-    else
-        echo -e "\n${C_RED}❌ ZiVPN Service failed to start. Check logs: journalctl -u zivpn.service${C_RESET}"
     fi
 }
 
@@ -6366,9 +6275,6 @@ purge_nginx() {
             return
         fi
         echo -e "\n${C_YELLOW}⚠️ This removes the internal Nginx proxy on ${NGINX_INTERNAL_HTTP_PORT}/${NGINX_INTERNAL_TLS_PORT}.${C_RESET}"
-        if systemctl is-active --quiet haproxy; then
-            echo -e "${C_YELLOW}⚠️ HAProxy will stay installed, but web payload routing from ${EDGE_PUBLIC_HTTP_PORT}/${EDGE_PUBLIC_TLS_PORT} will stop until you reinstall the stack.${C_RESET}"
-        fi
         read -p "👉 Continue and purge Nginx? (y/n): " confirm
         if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
             echo -e "\n${C_YELLOW}❌ Uninstallation cancelled.${C_RESET}"
@@ -6398,28 +6304,30 @@ purge_nginx() {
 install_nginx_proxy() {
     clear; show_banner
     echo -e "${C_BOLD}${C_PURPLE}--- 🚀 Reconfiguring Internal Nginx Proxy (8880/8443) ---${C_RESET}"
-    echo -e "\n${C_CYAN}This keeps HAProxy on ${EDGE_PUBLIC_HTTP_PORT}/${EDGE_PUBLIC_TLS_PORT} and rewrites the internal Nginx proxy on ${NGINX_INTERNAL_HTTP_PORT}/${NGINX_INTERNAL_TLS_PORT}.${C_RESET}"
+    echo -e "\n${C_CYAN}This rewrites the internal Nginx proxy on ${NGINX_INTERNAL_HTTP_PORT}/${NGINX_INTERNAL_TLS_PORT}.${C_RESET}"
 
     if [ ! -s "$SSL_CERT_FILE" ] || [ ! -s "$SSL_CERT_CHAIN_FILE" ] || [ ! -s "$SSL_CERT_KEY_FILE" ]; then
         echo -e "\n${C_YELLOW}⚠️ No shared VPS_superScript certificate was found.${C_RESET}"
-        echo -e "${C_DIM}Running the full HAProxy edge installer so the certificate and both services stay aligned.${C_RESET}"
-        install_ssl_tunnel
-        return
+        echo -e "${C_DIM}Generating one before the proxy is written, so Nginx can start with a valid TLS cert.${C_RESET}"
+        mkdir -p "$SSL_CERT_DIR"
+        # Straight to the certificate, not back through install_nginx_proxy:
+        # that function delegates here when the cert is missing, so calling it
+        # would recurse.
+        local _cn; _cn=$(detect_preferred_host)
+        [[ -z "$_cn" ]] && _cn="_"
+        generate_self_signed_edge_cert "$_cn" || return
+        load_edge_cert_info
     fi
 
     mkdir -p "$DB_DIR" "$SSL_CERT_DIR"
     ensure_edge_stack_packages || return
 
-    systemctl stop haproxy >/dev/null 2>&1
     systemctl stop nginx >/dev/null 2>&1
     sleep 1
 
     check_and_free_ports \
-        "$EDGE_PUBLIC_HTTP_PORT" \
-        "$EDGE_PUBLIC_TLS_PORT" \
         "$NGINX_INTERNAL_HTTP_PORT" \
-        "$NGINX_INTERNAL_TLS_PORT" \
-        "$HAPROXY_INTERNAL_DECRYPT_PORT" || return
+        "$NGINX_INTERNAL_TLS_PORT" || return
 
     check_and_open_firewall_port "$EDGE_PUBLIC_HTTP_PORT" tcp || return
     check_and_open_firewall_port "$EDGE_PUBLIC_TLS_PORT" tcp || return
@@ -6431,14 +6339,13 @@ install_nginx_proxy() {
     configure_edge_stack "$server_name" || return
 
     echo -e "\n${C_GREEN}✅ Internal Nginx proxy reconfigured successfully.${C_RESET}"
-    echo -e "   • Public HAProxy edge: ${C_YELLOW}${EDGE_PUBLIC_HTTP_PORT}/${EDGE_PUBLIC_TLS_PORT}${C_RESET}"
     echo -e "   • Internal Nginx: ${C_YELLOW}${NGINX_INTERNAL_HTTP_PORT}/${NGINX_INTERNAL_TLS_PORT}${C_RESET}"
 }
 
 request_certbot_ssl() {
     clear; show_banner
-    echo -e "${C_BOLD}${C_PURPLE}--- 🔒 Shared Certbot Certificate (HAProxy + Nginx) ---${C_RESET}"
-    echo -e "\n${C_DIM}This will replace the shared certificate used by HAProxy on ${EDGE_PUBLIC_TLS_PORT} and internal Nginx on ${NGINX_INTERNAL_TLS_PORT}.${C_RESET}"
+    echo -e "${C_BOLD}${C_PURPLE}--- 🔒 Shared Certbot Certificate (Nginx) ---${C_RESET}"
+    echo -e "\n${C_DIM}This will replace the shared certificate used by internal Nginx on ${NGINX_INTERNAL_TLS_PORT}.${C_RESET}"
 
     mkdir -p "$DB_DIR" "$SSL_CERT_DIR"
     ensure_edge_stack_packages || return
@@ -6532,38 +6439,23 @@ nginx_proxy_menu() {
     fi
     
     case $choice in
-        1) 
+        1)
             if systemctl is-active --quiet nginx; then
                 echo -e "\n${C_BLUE}🛑 Stopping Nginx...${C_RESET}"
                 systemctl stop nginx
                 echo -e "${C_GREEN}✅ Nginx stopped.${C_RESET}"
-                if systemctl is-active --quiet haproxy; then
-                    echo -e "${C_YELLOW}⚠️ HAProxy is still running, but web traffic that depends on internal Nginx will not work until Nginx starts again.${C_RESET}"
-                fi
             else
                 echo -e "\n${C_BLUE}▶️ Starting Nginx...${C_RESET}"
-                systemctl start nginx
-                if systemctl is-active --quiet nginx; then
+                if ff_service_up nginx "Nginx" 2; then
                     echo -e "${C_GREEN}✅ Nginx started.${C_RESET}"
-                else
-                    echo -e "${C_RED}❌ Failed to start Nginx.${C_RESET}"
                 fi
             fi
             press_enter
             ;;
         2)
-            echo -e "\n${C_BLUE}🔄 Restarting Nginx and HAProxy...${C_RESET}"
-            local restart_ok=true
-            systemctl restart nginx || restart_ok=false
-            if command -v haproxy &> /dev/null; then
-                systemctl restart haproxy || restart_ok=false
-            else
-                restart_ok=false
-            fi
-            if $restart_ok && systemctl is-active --quiet nginx && systemctl is-active --quiet haproxy; then
-                echo -e "${C_GREEN}✅ HAProxy + Nginx stack restarted.${C_RESET}"
-            else
-                echo -e "${C_RED}❌ One or more services failed to restart.${C_RESET}"
+            echo -e "\n${C_BLUE}🔄 Restarting Nginx...${C_RESET}"
+            if ff_service_up nginx "Nginx" 2; then
+                echo -e "${C_GREEN}✅ Nginx restarted.${C_RESET}"
             fi
             press_enter
             ;;
@@ -6953,6 +6845,7 @@ show_banner() {
     _add_port "ZiVPN"       "zivpn.service"      "${ZIVPN_LISTEN_PORT:-5667}"
     _add_port "UDP-Custom"  "udp-custom"         "${UDP_CUSTOM_LISTEN_PORT:-36712}"
     _add_port "BadVPN"      "badvpn"             "${BADVPN_LISTEN_PORT:-7300}"
+    _add_port "FalconProxy" "falconproxy"        "$(grep -oP '^PORTS="\K[^"]*' "$FALCONPROXY_CONFIG_FILE" 2>/dev/null | cut -d',' -f1 | grep . || echo "${FALCONPROXY_PORT:-8080}")"
     _add_port "DNSTT"       "dnstt.service"      "53"
     _add_port "Dropbear"    "dropbear"           "${DROPBEAR_PORTS:-109,143}"
     _add_port "Nginx"       "nginx"              "${NGINX_INTERNAL_HTTP_PORT:-8880}/${NGINX_INTERNAL_TLS_PORT:-8443}"
@@ -6996,18 +6889,17 @@ _pstat() {
 _PROTO_LIST=(
     "01|BADVPN|badvpn"
     "02|UDP-CUSTOM|udp-custom"
-    "03|HAPROXY SSL TUNNEL|haproxy"
-    "04|DNSTT (SLOWDNS)|dnstt.service"
-    "05|FALCON PROXY|falconproxy"
-    "06|ZIVPN|zivpn.service"
-    "07|DROPBEAR|dropbear"
-    "08|OPENVPN|openvpn@server-tcp"
-    "09|WIREGUARD|wg-quick@wg0"
-    "10|HYSTERIA 1/2|hysteria-server"
-    "11|SHADOWSOCKS|shadowsocks-libev"
-    "12|SOCKS5 PROXY|danted"
-    "13|STUNNEL|stunnel4"
-    "14|WS-SSH|ws-ssh"
+    "03|DNSTT (SLOWDNS)|dnstt.service"
+    "04|FALCON PROXY|falconproxy"
+    "05|ZIVPN|zivpn.service"
+    "06|DROPBEAR|dropbear"
+    "07|OPENVPN|openvpn@server-tcp"
+    "08|WIREGUARD|wg-quick@wg0"
+    "09|HYSTERIA 1/2|hysteria-server"
+    "10|SHADOWSOCKS|shadowsocks-libev"
+    "11|SOCKS5 PROXY|danted"
+    "12|STUNNEL|stunnel4"
+    "13|WS-SSH|ws-ssh"
 )
 
 # Print the roster two per row with live status tags. $1 is the arrow/verb
@@ -7073,18 +6965,17 @@ install_protocols_menu() {
         case $ic in
             01|1)  install_badvpn; press_enter ;;
             02|2)  install_udp_custom; press_enter ;;
-            03|3)  install_ssl_tunnel; press_enter ;;
-            04|4)  install_dnstt; press_enter ;;
-            05|5)  install_falcon_proxy; press_enter ;;
-            06|6)  install_zivpn; press_enter ;;
-            07|7)  install_dropbear; press_enter ;;
-            08|8)  install_openvpn; press_enter ;;
-            09|9)  install_wireguard; press_enter ;;
-            10) install_hysteria; press_enter ;;
-            11) install_shadowsocks; press_enter ;;
-            12) install_socks5; press_enter ;;
-            13) install_stunnel; press_enter ;;
-            14) install_ws_ssh; press_enter ;;
+            03|3)  install_dnstt; press_enter ;;
+            04|4)  install_falcon_proxy; press_enter ;;
+            05|5)  install_zivpn; press_enter ;;
+            06|6)  install_dropbear; press_enter ;;
+            07|7)  install_openvpn; press_enter ;;
+            08|8)  install_wireguard; press_enter ;;
+            09|9)  install_hysteria; press_enter ;;
+            10) install_shadowsocks; press_enter ;;
+            11) install_socks5; press_enter ;;
+            12) install_stunnel; press_enter ;;
+            13) install_ws_ssh; press_enter ;;
             0) return ;;
             *) invalid_option ;;
         esac
@@ -7106,18 +6997,17 @@ uninstall_protocols_menu() {
         case $uc in
             01|1)  uninstall_badvpn; press_enter ;;
             02|2)  uninstall_udp_custom; press_enter ;;
-            03|3)  uninstall_ssl_tunnel; press_enter ;;
-            04|4)  uninstall_dnstt; press_enter ;;
-            05|5)  uninstall_falcon_proxy; press_enter ;;
-            06|6)  uninstall_zivpn; press_enter ;;
-            07|7)  uninstall_dropbear; press_enter ;;
-            08|8)  uninstall_openvpn; press_enter ;;
-            09|9)  uninstall_wireguard; press_enter ;;
-            10) uninstall_hysteria; press_enter ;;
-            11) uninstall_shadowsocks; press_enter ;;
-            12) uninstall_socks5; press_enter ;;
-            13) uninstall_stunnel; press_enter ;;
-            14) uninstall_ws_ssh; press_enter ;;
+            03|3)  uninstall_dnstt; press_enter ;;
+            04|4)  uninstall_falcon_proxy; press_enter ;;
+            05|5)  uninstall_zivpn; press_enter ;;
+            06|6)  uninstall_dropbear; press_enter ;;
+            07|7)  uninstall_openvpn; press_enter ;;
+            08|8)  uninstall_wireguard; press_enter ;;
+            09|9)  uninstall_hysteria; press_enter ;;
+            10) uninstall_shadowsocks; press_enter ;;
+            11) uninstall_socks5; press_enter ;;
+            12) uninstall_stunnel; press_enter ;;
+            13) uninstall_ws_ssh; press_enter ;;
             0) return ;;
             *) invalid_option ;;
         esac
@@ -7201,7 +7091,7 @@ uninstall_script() {
     echo -e " - The main command ($(command -v menu))"
     echo -e " - All configuration and user data ($DB_DIR)"
     echo -e " - The active limiter service ($LIMITER_SERVICE)"
-    echo -e " - All installed services (badvpn, udp-custom, HAProxy Edge Stack, Nginx, DNSTT)"
+    echo -e " - All installed services (badvpn, udp-custom, Nginx, DNSTT)"
     echo -e "\n${C_RED}This action is irreversible.${C_RESET}"
     echo ""
     read -p "👉 Type 'yes' to confirm and proceed with uninstallation: " confirm
@@ -7253,7 +7143,7 @@ uninstall_script() {
     uninstall_dnstt
     uninstall_badvpn
     uninstall_udp_custom
-    uninstall_ssl_tunnel
+    cleanup_legacy_haproxy
     uninstall_falcon_proxy
     uninstall_zivpn
     uninstall_dropbear 2>/dev/null
@@ -7778,18 +7668,11 @@ generate_client_config() {
     echo -e "   • Port: 22"
     echo -e "   • payload: (Standard SSH)"
 
-    # 2. HAProxy edge stack
-    if systemctl is-active --quiet haproxy; then
-        echo -e "\n🔹 ${C_BOLD}HAProxy Edge Stack${C_RESET}:"
-        echo -e "   • Host: $host_domain"
-        echo -e "   • Port 80: HTTP payloads / raw SSH"
-        echo -e "   • Port 443: TLS / SNI / SSL payloads"
-        echo -e "   • Internal handoff: Nginx ${NGINX_INTERNAL_HTTP_PORT}/${NGINX_INTERNAL_TLS_PORT}"
-        echo -e "   • SNI (BugHost): $host_domain (or your preferred SNI)"
-    elif systemctl is-active --quiet nginx; then
+    # 2. Internal Nginx proxy (the only edge this script installs)
+    if systemctl is-active --quiet nginx; then
         echo -e "\n🔹 ${C_BOLD}Internal Nginx Proxy${C_RESET}:"
-        echo -e "   • Internal only: ${NGINX_INTERNAL_HTTP_PORT}/${NGINX_INTERNAL_TLS_PORT}"
-        echo -e "   • Public clients should connect through HAProxy on ${EDGE_PUBLIC_HTTP_PORT}/${EDGE_PUBLIC_TLS_PORT}"
+        echo -e "   • Ports: ${NGINX_INTERNAL_HTTP_PORT}/${NGINX_INTERNAL_TLS_PORT} (loopback)"
+        echo -e "   • SNI (BugHost): $host_domain (or your preferred SNI)"
     fi
 
     # 3. UDP Custom
@@ -9609,6 +9492,7 @@ install_dropbear() {
     echo -e "${C_BOLD}${C_PURPLE}--- 🦘 Install Dropbear (Lightweight SSH) ---${C_RESET}"
     if command -v dropbear &>/dev/null; then
         echo -e "\n${C_YELLOW}ℹ️ Dropbear is already installed.${C_RESET}"
+        ff_service_kick dropbear "Dropbear"
         return
     fi
     echo -e "\n${C_BLUE}📦 Installing Dropbear...${C_RESET}"
@@ -9633,9 +9517,15 @@ install_dropbear() {
         sed -i 's/^#\?\s*DROPBEAR_PORT=.*/DROPBEAR_PORT=22/' /etc/default/dropbear
     fi
 
-    systemctl enable dropbear 2>/dev/null
-    systemctl restart dropbear 2>/dev/null
-    echo -e "${C_GREEN}✅ Dropbear installed on ports ${DROPBEAR_PORTS}.${C_RESET}"
+    # On Debian/Ubuntu the dropbear package ships `dropbear.socket` alongside
+    # `dropbear.service`. Enabling the service starts a listener immediately;
+    # starting the socket instead leaves `is-active dropbear` reporting inactive
+    # while Dropbear is in fact reachable — which the status grid reads as red.
+    # Disable the socket so the unit the grid checks is the one that runs.
+    systemctl disable --now dropbear.socket >/dev/null 2>&1
+    if ff_service_up dropbear "Dropbear" 2; then
+        echo -e "${C_GREEN}✅ Dropbear installed on ports ${DROPBEAR_PORTS}.${C_RESET}"
+    fi
 }
 uninstall_dropbear() {
     echo -e "\n${C_BLUE}🗑️ Removing Dropbear...${C_RESET}"
@@ -9802,15 +9692,16 @@ PORTS="${WS_SSH_INTERNAL_PORT}"
 RESPONSE="${ws_response}"
 WSCFG
 
-    systemctl daemon-reload
     check_and_open_firewall_port "$WS_SSH_INTERNAL_PORT" tcp
-    systemctl enable ws-ssh 2>/dev/null
-    systemctl restart ws-ssh 2>/dev/null
+    if ! ff_service_up ws-ssh "WS-SSH" 2; then
+        echo -e "${C_YELLOW}ℹ️ WS-SSH bridge did not come up. Check that port ${WS_SSH_INTERNAL_PORT} is free and python3 is installed.${C_RESET}"
+        return 1
+    fi
 
-    echo -e "\n${C_GREEN}✅ WS-SSH installed.${C_RESET}"
+    echo -e "\n${C_GREEN}✅ WS-SSH installed and active.${C_RESET}"
     echo -e "${C_CYAN}   Internal bridge port: ${WS_SSH_INTERNAL_PORT}${C_RESET}"
     echo -e "${C_CYAN}   HTTP Response: ${ws_response}${C_RESET}"
-    echo -e "${C_CYAN}   Access via HAProxy/Nginx: ports 80, 443 (path /${WS_SSH_INTERNAL_PORT}/)${C_RESET}"
+    echo -e "${C_CYAN}   Access via the Nginx proxy: ports 80, 443 (path /${WS_SSH_INTERNAL_PORT}/)${C_RESET}"
     echo -e "${C_CYAN}   Or direct: port ${WS_SSH_INTERNAL_PORT}${C_RESET}"
     echo -e "${C_DIM}   Works with HTTP Injector, HA Tunnel, KPN Tunnel, etc.${C_RESET}"
 
@@ -9991,18 +9882,21 @@ username-as-common-name
 duplicate-cn
 OVPNC
 
-    # Enable and start TCP + UDP instances
-    systemctl enable openvpn@server-tcp 2>/dev/null
-    systemctl enable openvpn@server-udp 2>/dev/null
-    systemctl start openvpn@server-tcp 2>/dev/null
-    systemctl start openvpn@server-udp 2>/dev/null
+    # Enable and start TCP + UDP instances. Both are verified: /etc/openvpn is
+    # scanned for *.conf and each match becomes openvpn@<basename>, so a missing
+    # cert, DH file or PAM plugin used to announce success and leave red dots.
+    local _ovpn_ok=true
+    ff_service_up openvpn@server-tcp "OpenVPN (TCP)" 3 || _ovpn_ok=false
+    ff_service_up openvpn@server-udp "OpenVPN (UDP)" 3 || _ovpn_ok=false
     # SlowDNS server is started only when DNSTT is active
 
-    echo -e "\n${C_GREEN}✅ OpenVPN installed with auto-generated PKI.${C_RESET}"
-    echo -e "${C_CYAN}   TCP mode:     ${OPENVPN_TCP_PORT} (active)${C_RESET}"
-    echo -e "${C_CYAN}   UDP mode:     ${OPENVPN_UDP_PORT} (active)${C_RESET}"
+    if $_ovpn_ok; then
+        echo -e "\n${C_GREEN}✅ OpenVPN installed with auto-generated PKI.${C_RESET}"
+        echo -e "${C_CYAN}   TCP mode:     ${OPENVPN_TCP_PORT} (active)${C_RESET}"
+        echo -e "${C_CYAN}   UDP mode:     ${OPENVPN_UDP_PORT} (active)${C_RESET}"
+        echo -e "${C_DIM}   Client configs will be auto-generated on account creation.${C_RESET}"
+    fi
     echo -e "${C_CYAN}   SlowDNS mode: ${OPENVPN_SDNS_PORT} (start with DNSTT)${C_RESET}"
-    echo -e "${C_DIM}   Client configs will be auto-generated on account creation.${C_RESET}"
 }
 uninstall_openvpn() {
     echo -e "\n${C_BLUE}🗑️ Removing OpenVPN...${C_RESET}"
@@ -10022,6 +9916,8 @@ install_wireguard() {
         echo -e "\n${C_YELLOW}ℹ️ WireGuard is already installed.${C_RESET}"
         return
     fi
+    # Present but stopped (reboot, failed start): wg0.conf exists, so fall
+    # through to the enable/start block rather than reinstalling from scratch.
     echo -e "\n${C_BLUE}📦 Installing WireGuard...${C_RESET}"
     ff_pkg_install wireguard wireguard-tools >/dev/null 2>&1 || { echo -e "${C_RED}❌ Failed to install WireGuard.${C_RESET}"; return; }
 
@@ -10050,13 +9946,12 @@ PostUp = iptables -A FORWARD -i wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o
 PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o $(ip -4 route ls | grep default | grep -Po '(?<=dev )(\S+)' | head -1) -j MASQUERADE
 WGE
 
-    systemctl enable wg-quick@wg0 2>/dev/null
-    systemctl start wg-quick@wg0 2>/dev/null
-
-    echo -e "\n${C_GREEN}✅ WireGuard installed with auto-generated keys.${C_RESET}"
-    echo -e "${C_CYAN}   Listen port: ${WIREGUARD_PORT} (udp)${C_RESET}"
-    echo -e "${C_CYAN}   Server pubkey: $(</etc/wireguard/server.pub)${C_RESET}"
-    echo -e "${C_DIM}   Client configs will be auto-generated on account creation.${C_RESET}"
+    if ff_service_up wg-quick@wg0 "WireGuard" 3; then
+        echo -e "\n${C_GREEN}✅ WireGuard installed with auto-generated keys.${C_RESET}"
+        echo -e "${C_CYAN}   Listen port: ${WIREGUARD_PORT} (udp)${C_RESET}"
+        echo -e "${C_CYAN}   Server pubkey: $(</etc/wireguard/server.pub)${C_RESET}"
+        echo -e "${C_DIM}   Client configs will be auto-generated on account creation.${C_RESET}"
+    fi
 }
 uninstall_wireguard() {
     echo -e "\n${C_BLUE}🗑️ Removing WireGuard...${C_RESET}"
@@ -10073,6 +9968,14 @@ install_hysteria() {
     echo -e "${C_BOLD}${C_PURPLE}--- 🌪️ Install Hysteria 2 ---${C_RESET}"
     if systemctl is-active --quiet hysteria-server 2>/dev/null; then
         echo -e "\n${C_YELLOW}ℹ️ Hysteria is already installed.${C_RESET}"
+        return
+    fi
+    # Installed but down (reboot or failed start) still has its unit + config, so
+    # jump straight to the enable/start block instead of redownloading.
+    if [[ -f /etc/systemd/system/hysteria-server.service && -f /etc/hysteria/config.json ]]; then
+        if ff_service_up hysteria-server "Hysteria 2" 2; then
+            echo -e "\n${C_GREEN}✅ Hysteria 2 is active on port ${HYSTERIA2_PORT} (udp/quic).${C_RESET}"
+        fi
         return
     fi
     echo -e "\n${C_BLUE}📦 Installing Hysteria 2 binary...${C_RESET}"
@@ -10126,13 +10029,11 @@ RestartSec=5
 WantedBy=multi-user.target
 HYSRV
 
-    systemctl daemon-reload
-    systemctl enable hysteria-server 2>/dev/null
-    systemctl start hysteria-server 2>/dev/null
-
-    echo -e "\n${C_GREEN}✅ Hysteria 2 installed with auto-generated config.${C_RESET}"
-    echo -e "${C_CYAN}   Listen port: ${HYSTERIA2_PORT} (udp/quic)${C_RESET}"
-    echo -e "${C_DIM}   Client configs will be auto-generated on account creation.${C_RESET}"
+    if ff_service_up hysteria-server "Hysteria 2" 2; then
+        echo -e "\n${C_GREEN}✅ Hysteria 2 installed with auto-generated config.${C_RESET}"
+        echo -e "${C_CYAN}   Listen port: ${HYSTERIA2_PORT} (udp/quic)${C_RESET}"
+        echo -e "${C_DIM}   Client configs will be auto-generated on account creation.${C_RESET}"
+    fi
 }
 uninstall_hysteria() {
     echo -e "\n${C_BLUE}🗑️ Removing Hysteria...${C_RESET}"
@@ -10164,9 +10065,13 @@ install_shadowsocks() {
 }
 EOF
     check_and_open_firewall_port "$SHADOWSOCKS_PORT" tcp
-    systemctl enable shadowsocks-libev 2>/dev/null
-    systemctl restart shadowsocks-libev 2>/dev/null
-    echo -e "${C_GREEN}✅ ShadowSocks installed on port ${SHADOWSOCKS_PORT}.${C_RESET}"
+    # The packaged unit runs `ss-server -c /etc/shadowsocks-libev/config.json`.
+    # It was enabled and restarted without ever being checked, so a rejected
+    # config (bad cipher, port in use, fast_open without kernel support) still
+    # printed "✅ installed".
+    if ff_service_up shadowsocks-libev "ShadowSocks" 2; then
+        echo -e "${C_GREEN}✅ ShadowSocks installed on port ${SHADOWSOCKS_PORT}.${C_RESET}"
+    fi
 }
 uninstall_shadowsocks() {
     echo -e "\n${C_BLUE}🗑️ Removing ShadowSocks...${C_RESET}"
@@ -10202,36 +10107,19 @@ socks pass {
 }
 EOF
     check_and_open_firewall_port "$SOCKS5_PORT" tcp
-    systemctl enable danted 2>/dev/null
-    systemctl restart danted 2>/dev/null
-    echo -e "${C_GREEN}✅ Socks5 proxy installed on port ${SOCKS5_PORT}.${C_RESET}"
+    # Debian's dante-server unit starts danted only after `systemctl enable`;
+    # a config it cannot parse (missing default interface, bad rule syntax)
+    # exits immediately, which is why the install used to look successful and
+    # the grid stayed red.
+    if ff_service_up danted "Socks5 proxy" 2; then
+        echo -e "${C_GREEN}✅ Socks5 proxy installed on port ${SOCKS5_PORT}.${C_RESET}"
+    fi
 }
 uninstall_socks5() {
     echo -e "\n${C_BLUE}🗑️ Removing Socks5 proxy...${C_RESET}"
     systemctl stop danted 2>/dev/null; systemctl disable danted 2>/dev/null
     ff_pkg_purge dante-server >/dev/null 2>&1
     echo -e "${C_GREEN}✅ Socks5 proxy removed.${C_RESET}"
-}
-
-# ── Squid Proxy ───────────────────────────────────────────
-install_squid() {
-    clear; show_banner
-    echo -e "${C_BOLD}${C_PURPLE}--- 🐙 Install Squid Proxy ---${C_RESET}"
-    if systemctl is-active --quiet squid 2>/dev/null; then
-        echo -e "\n${C_YELLOW}ℹ️ Squid is already installed.${C_RESET}"
-        return
-    fi
-    ff_pkg_install squid >/dev/null 2>&1 || { echo -e "${C_RED}❌ Failed.${C_RESET}"; return; }
-    check_and_open_firewall_port "$SQUID_PORT" tcp
-    systemctl enable squid 2>/dev/null
-    systemctl restart squid 2>/dev/null
-    echo -e "${C_GREEN}✅ Squid installed and started on port ${SQUID_PORT}.${C_RESET}"
-}
-uninstall_squid() {
-    echo -e "\n${C_BLUE}🗑️ Removing Squid...${C_RESET}"
-    systemctl stop squid 2>/dev/null; systemctl disable squid 2>/dev/null
-    ff_pkg_purge squid >/dev/null 2>&1
-    echo -e "${C_GREEN}✅ Squid removed.${C_RESET}"
 }
 
 # ── Stunnel ───────────────────────────────────────────────
@@ -10245,6 +10133,9 @@ install_stunnel() {
     ff_pkg_install stunnel4 >/dev/null 2>&1 || { echo -e "${C_RED}❌ Failed.${C_RESET}"; return; }
     check_and_open_firewall_port "$STUNNEL_PORT" tcp
     mkdir -p /etc/stunnel
+    # The packaged unit writes its pid to /var/run/stunnel4/, and a missing
+    # runtime dir is the usual reason stunnel exits right after start.
+    mkdir -p /var/run/stunnel4 && chown stunnel4:stunnel4 /var/run/stunnel4 2>/dev/null
 
     if [[ -f "$SSL_CERT_FILE" ]]; then
         local _st_cert="$SSL_CERT_FILE"
@@ -10265,62 +10156,15 @@ cert = ${_st_cert}
 STCFG
 
     sed -i 's/^ENABLED=0/ENABLED=1/' /etc/default/stunnel4 2>/dev/null
-    systemctl enable stunnel4 2>/dev/null
-    systemctl restart stunnel4 2>/dev/null
-    echo -e "${C_GREEN}✅ Stunnel installed and started on port ${STUNNEL_PORT} (wrapping SSH).${C_RESET}"
+    if ff_service_up stunnel4 "Stunnel" 2; then
+        echo -e "${C_GREEN}✅ Stunnel installed and started on port ${STUNNEL_PORT} (wrapping SSH).${C_RESET}"
+    fi
 }
 uninstall_stunnel() {
     echo -e "\n${C_BLUE}🗑️ Removing Stunnel...${C_RESET}"
     systemctl stop stunnel4 2>/dev/null; systemctl disable stunnel4 2>/dev/null
     ff_pkg_purge stunnel4 >/dev/null 2>&1
     echo -e "${C_GREEN}✅ Stunnel removed.${C_RESET}"
-}
-
-# ── Argo Tunnel ──────────────────────────────────────────
-install_argo_tunnel() {
-    clear; show_banner
-    echo -e "${C_BOLD}${C_PURPLE}--- ☁️ Install Argo (Cloudflare) Tunnel ---${C_RESET}"
-    if command -v cloudflared &>/dev/null; then
-        echo -e "\n${C_YELLOW}ℹ️ Argo Tunnel is already installed.${C_RESET}"
-        return
-    fi
-    echo -e "\n${C_BLUE}📦 Installing Cloudflared...${C_RESET}"
-    local arch; arch=$(uname -m)
-    local url
-    case "$arch" in
-        x86_64)  url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64" ;;
-        aarch64) url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64" ;;
-        *) echo -e "${C_RED}❌ Unsupported arch.${C_RESET}"; return ;;
-    esac
-    ff_fetch_binary /usr/local/bin/cloudflared "$url" || { echo -e "${C_RED}❌ Download failed.${C_RESET}"; return; }
-    chmod +x /usr/local/bin/cloudflared
-    check_and_open_firewall_port "$ARGO_TUNNEL_HTTP" tcp
-    check_and_open_firewall_port "$ARGO_TUNNEL_HTTPS" tcp
-
-    cat > /etc/systemd/system/argo-tunnel.service <<ARGOSVC
-[Unit]
-Description=Cloudflare Argo Tunnel
-After=network.target
-[Service]
-Type=simple
-User=root
-ExecStart=/usr/local/bin/cloudflared tunnel run
-Restart=on-failure
-RestartSec=5
-[Install]
-WantedBy=multi-user.target
-ARGOSVC
-    systemctl daemon-reload
-
-    echo -e "${C_GREEN}✅ Cloudflared installed. Run 'cloudflared tunnel login' to configure, then 'systemctl start argo-tunnel'.${C_RESET}"
-    echo -e "${C_YELLOW}⚠️ Using ports ${ARGO_TUNNEL_HTTP}/${ARGO_TUNNEL_HTTPS} to avoid conflict with HAProxy (80/443) and Nginx (8880/8443).${C_RESET}"
-}
-uninstall_argo_tunnel() {
-    echo -e "\n${C_BLUE}🗑️ Removing Argo Tunnel...${C_RESET}"
-    systemctl stop argo-tunnel 2>/dev/null; systemctl disable argo-tunnel 2>/dev/null
-    rm -f /usr/local/bin/cloudflared /etc/systemd/system/argo-tunnel.service
-    systemctl daemon-reload
-    echo -e "${C_GREEN}✅ Argo Tunnel removed.${C_RESET}"
 }
 
 # ═══════════════════════════════════════════════════════════
@@ -10561,8 +10405,9 @@ EOF
                 systemctl daemon-reload
                 check_and_open_firewall_port "$REST_API_PORT" tcp
             fi
-            systemctl enable rest-api 2>/dev/null; systemctl restart rest-api 2>/dev/null
-            echo -e "${C_GREEN}✅ Rest API started on port ${REST_API_PORT}.${C_RESET}"
+            if ff_service_up rest-api "Rest API" 2; then
+                echo -e "${C_GREEN}✅ Rest API started on port ${REST_API_PORT}.${C_RESET}"
+            fi
             press_enter ;;
         2) systemctl stop rest-api 2>/dev/null; echo -e "${C_YELLOW}⏹️ Stopped.${C_RESET}"; press_enter ;;
         3) systemctl restart rest-api 2>/dev/null; echo -e "${C_GREEN}✅ Restarted.${C_RESET}"; press_enter ;;
@@ -10621,11 +10466,14 @@ on_off_service_menu() {
                 fi
                 echo -e "\n${C_YELLOW}⏹️ Stopped $target${C_RESET}"
             else
-                systemctl start "$target" 2>/dev/null
-                if [[ "$target" == "openvpn@server-tcp" ]]; then
-                    systemctl start openvpn@server-udp 2>/dev/null
+                # Verified start: a unit whose config is broken used to print
+                # "Started" and stay red on the banner.
+                if ff_service_up "$target" "$target" 2; then
+                    if [[ "$target" == "openvpn@server-tcp" ]]; then
+                        ff_service_up openvpn@server-udp "openvpn@server-udp" 2 || true
+                    fi
+                    echo -e "\n${C_GREEN}▶️ Started $target${C_RESET}"
                 fi
-                echo -e "\n${C_GREEN}▶️ Started $target${C_RESET}"
             fi
             press_enter
         else
@@ -10870,6 +10718,7 @@ clear; show_banner
             "OpenVPN:${OPENVPN_TCP_PORT}, ${OPENVPN_UDP_PORT}, ${OPENVPN_SDNS_PORT}"
             "WireGuard:${WIREGUARD_PORT}"
             "Hysteria:${HYSTERIA1_PORT}/${HYSTERIA2_PORT}"
+            "ShadowSocks:${SHADOWSOCKS_PORT:-2443}"
             "Socks5:${SOCKS5_PORT}"
             "Stunnel:${STUNNEL_PORT}"
             "WS-SSH:80, 443 (bridge:${WS_SSH_INTERNAL_PORT}) [$(grep -oP '^RESPONSE="\K[^"]*' "$WS_SSH_CONFIG_FILE" 2>/dev/null || echo 'HTTP/1.1 101 Switching Protocols')]"
@@ -10900,10 +10749,6 @@ clear; show_banner
                         sed -i "s/^Port .*/Port $new_port/" /etc/ssh/sshd_config 2>/dev/null
                         systemctl try-restart sshd 2>/dev/null || systemctl try-restart ssh 2>/dev/null
                         echo -e "${C_GREEN}✅ SSH port changed to $new_port.${C_RESET}" ;;
-                    HAProxy)
-                        sed -i "s/bind \*:[0-9]*/bind *:$new_port/" /etc/haproxy/haproxy.cfg 2>/dev/null
-                        systemctl try-restart haproxy 2>/dev/null
-                        echo -e "${C_GREEN}✅ HAProxy ports updated. Restart manually if syntax changed.${C_RESET}" ;;
                     ZiVPN)
                         sed -i "s/\"listen\":.*/\"listen\": \":$new_port\",/" /etc/zivpn/config.json 2>/dev/null
                         systemctl try-restart zivpn 2>/dev/null
@@ -10935,15 +10780,36 @@ clear; show_banner
                         systemctl try-restart hysteria-server 2>/dev/null
                         HYSTERIA1_PORT="$_h1"; HYSTERIA2_PORT="$_h2" ;;
                     ShadowSocks)
-                        sed -i "s/\"server_port\":.*/\"server_port\": $new_port,/" /etc/shadowsocks-libev/config.json 2>/dev/null
+                        # Rewrite the field properly: the old sed appended a comma
+                        # to the whole line, producing invalid JSON that made
+                        # ss-server refuse to start.
+                        if command -v jq &>/dev/null && [[ -f /etc/shadowsocks-libev/config.json ]]; then
+                            local _ss_tmp; _ss_tmp=$(mktemp) || _ss_tmp=""
+                            if [[ -n "$_ss_tmp" ]] && jq --argjson p "$new_port" '.server_port = $p' \
+                                /etc/shadowsocks-libev/config.json > "$_ss_tmp" 2>/dev/null; then
+                                mv "$_ss_tmp" /etc/shadowsocks-libev/config.json
+                            else
+                                rm -f "$_ss_tmp" 2>/dev/null
+                                echo -e "${C_RED}❌ Could not update the ShadowSocks config.${C_RESET}"
+                            fi
+                        else
+                            sed -i "s/\"server_port\":[0-9]*/\"server_port\":${new_port}/" /etc/shadowsocks-libev/config.json 2>/dev/null
+                        fi
                         systemctl try-restart shadowsocks-libev 2>/dev/null
                         SHADOWSOCKS_PORT="$new_port" ;;
                     Socks5)
-                        sed -i "s/internal:.*port = .*/internal: 0.0.0.0 port = $new_port/" /etc/danted.conf 2>/dev/null
+                        # danted needs BOTH the internal and external listener
+                        # moved; rewriting only `internal:` left the socket on
+                        # the old port and danted refused to bind the new one.
+                        sed -i "s/^internal:.*port *= *[0-9]*/internal: 0.0.0.0 port = $new_port/" /etc/danted.conf 2>/dev/null
+                        sed -i "s/^external:.*port *= *[0-9]*/external: $(ip -4 route ls | grep default | grep -Po '(?<=dev )(\S+)' | head -1) port = $new_port/" /etc/danted.conf 2>/dev/null
                         systemctl try-restart danted 2>/dev/null
                         SOCKS5_PORT="$new_port" ;;
                     Stunnel)
-                        echo -e "${C_YELLOW}⚠️ Update /etc/stunnel/*.conf manually with new port.${C_RESET}"
+                        # The accept line is the only thing tied to the port; its
+                        # comments and [ssh] section stay untouched.
+                        sed -i "s/^accept *= *[0-9]*/accept = $new_port/" /etc/stunnel/stunnel.conf 2>/dev/null
+                        systemctl try-restart stunnel4 2>/dev/null
                         STUNNEL_PORT="$new_port" ;;
                     Rest-API)
                         sed -i "s/PORT = .*/PORT = $new_port/" /usr/local/bin/VPS_superScript-api.py 2>/dev/null
@@ -11017,8 +10883,7 @@ service_info_menu() {
             echo -e "      ${C_DIM}nano /etc/ssh/sshd_config${C_RESET}"
             echo -e "      ${C_DIM}nano /etc/default/dropbear${C_RESET}"
             echo
-            echo -e "   ${C_WHITE}── HAProxy / Nginx${C_RESET}"
-            echo -e "      ${C_DIM}nano /etc/haproxy/haproxy.cfg${C_RESET}"
+            echo -e "   ${C_WHITE}── Nginx${C_RESET}"
             echo -e "      ${C_DIM}nano /etc/nginx/nginx.conf${C_RESET}"
             echo
             echo -e "   ${C_WHITE}── ZiVPN${C_RESET}"

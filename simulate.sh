@@ -48,7 +48,7 @@ show_banner_sim() {
 
     # Simulated active services
     local services=(
-        "SSH:22" "SSL (HAProxy):80, 443"
+        "SSH:22" "Nginx Int.:80, 443"
         "ZiVPN:5667" "UDP-Custom:36712"
         "BadVPN:7300" "DNSTT:53"
         "Nginx Int.:8880, 8443" "Dropbear:109, 143"

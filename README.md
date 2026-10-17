@@ -46,7 +46,7 @@ bash <(curl -Ls https://github.com/SONICE-ENCHIL/VPS_superScript-Revamp/raw/main
 Easily spin up entire tunneling infrastructures onto your server without touching a single complex config file.
 * **BadVPN (UDP Gateway):** Optimize gaming and tunneling packets.
 * **UDP Custom:** Manage customizable UDP bypasses.
-* **SSL Tunnels:** HAProxy payload routing on port 443/80.
+* **Nginx Edge Proxy:** Shared TLS termination on port 443/80 with payload routing to internal services.
 * **Nginx Reverse Proxy:** Full HTTP/HTTPS webserver installer, featuring **Auto-Certbot integration** for free SSL certificates.
 * **DNSTT (SlowDNS):** Bypass heavy firewalls through port 53 DNS records.
 * **Falcon Proxy:** Setup and customize version-controlled Websocket/Socks proxies.
@@ -85,7 +85,7 @@ Easily spin up entire tunneling infrastructures onto your server without touchin
    ·····················································
    ·              🔧 ACTIVE SERVICES               ·
    ·····················································
-   ·  ◦ SSH:           22         ◦ SSL (HAProxy): 80, 443  ·
+   ·  ◦ SSH:           22         ◦ Nginx Int.:    80, 443  ·
    ·  ◦ ZiVPN:         5667       ◦ UDP-Custom:   36712    ·
    ·  ◦ BadVPN:        7300       ◦ DNSTT:        53      ·
    ·····················································
