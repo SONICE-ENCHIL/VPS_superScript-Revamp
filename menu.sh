@@ -1147,6 +1147,86 @@ require_interactive_terminal() {
     fi
 }
 
+# Re-check the stored license key on every launch. install-with-key.sh drops
+# the verifier at /usr/lib/VPS_superScript/vss-license.sh and the key at
+# /etc/VPS_superScript/license.key; a missing library means the install was
+# done with the un-gated install.sh, so we fall through rather than brick.
+vss_license_gate() {
+    local lib="/usr/lib/VPS_superScript/vss-license.sh"
+
+    if [[ ! -r "$lib" ]]; then
+        return 0
+    fi
+
+    # shellcheck source=/dev/null
+    source "$lib"
+
+    license_check_stored && { _vss_entitlement_gate_and_return; return 0; }
+
+    clear
+    echo -e "${C_RED}╔══════════════════════════════════════════════════╗${C_RESET}"
+    echo -e "${C_RED}║             LICENSE EXPIRED / INVALID            ║${C_RESET}"
+    echo -e "${C_RED}╚══════════════════════════════════════════════════╝${C_RESET}"
+    echo
+    echo "This installation needs a valid key to run."
+    echo "Send /renew to the seller's bot and paste the new key here."
+    echo
+
+    local newkey
+    printf 'Paste new key (blank to quit): ' >&2
+    read -r newkey
+    newkey="$(printf '%s' "$newkey" | tr -d '[:space:]')"
+    if [[ -n "$newkey" ]] && license_verify "$newkey"; then
+        license_save "$newkey"
+        echo -e "${C_GREEN}Key accepted — expires $VSS_LICENSE_EXPIRES.${C_RESET}"
+        sleep 1
+        _vss_entitlement_gate_and_return
+        return 0
+    fi
+
+    exit 1
+}
+
+# Entitlement layer (server-side plan/quota check). Optional: the client
+# library is only present on installs that shipped it, so its absence falls
+# through instead of bricking older boxes.
+_vss_entitlement_gate() {
+    local lib="/usr/lib/VPS_superScript/vss-api-client.sh"
+
+    if [[ ! -r "$lib" ]]; then
+        return 0
+    fi
+
+    # shellcheck source=/dev/null
+    source "$lib"
+
+    if vss_api_sync; then
+        return 0
+    fi
+
+    clear
+    echo -e "${C_RED}╔══════════════════════════════════════════════════╗${C_RESET}"
+    echo -e "${C_RED}║        ENTITLEMENT EXPIRED / UNREACHABLE         ║${C_RESET}"
+    echo -e "${C_RED}╚══════════════════════════════════════════════════╝${C_RESET}"
+    echo
+    echo "The server has not confirmed this installation's plan."
+    echo "Check the network, then press Enter to retry."
+    echo
+
+    if [[ -t 0 ]]; then
+        read -r _ans
+    fi
+    if vss_api_sync; then
+        return 0
+    fi
+    exit 1
+}
+
+_vss_entitlement_gate_and_return() {
+    _vss_entitlement_gate
+    return 0
+}
+
 initial_setup() {
     migrate_from_firewallfalcon
     migrate_from_skylartech
@@ -2676,10 +2756,6 @@ edit_user() {
             fi
         fi
         
-        local hwid_display="${C_DIM}none (multi-device)${C_RESET}"
-        if [[ -n "$cur_hwid" ]]; then
-            hwid_display="${C_YELLOW}$(_ff_hwid_label "$cur_hwid" "$cur_strict" enforce)${C_RESET}"
-        fi
         local _now_ts; printf -v _now_ts '%(%s)T' -1
         local _days_disp; _days_disp=$(_ff_days_left_str "$cur_expiry" "$_now_ts" "$username")
         local app_display="${C_CYAN}HTTP Custom${C_RESET}"
@@ -2691,8 +2767,45 @@ edit_user() {
             shadowsocks) app_display="${C_CYAN}ShadowSocks${C_RESET}" ;;
             socks5)      app_display="${C_CYAN}SOCKS5${C_RESET}" ;;
         esac
-        echo -e "\n  ${C_DIM}Current: Pass=${C_YELLOW}$cur_pass${C_RESET}${C_DIM} Exp=${C_YELLOW}$cur_expiry${C_RESET}${C_DIM} (${C_CYAN}${_days_disp} left${C_RESET}${C_DIM}) Conn=${C_YELLOW}$cur_limit${C_RESET}${C_DIM} BW=${C_YELLOW}$cur_bw_display${C_RESET}${C_DIM} Used=${C_CYAN}$bw_used_display${C_RESET}"
-        echo -e "  ${C_DIM}HWID=${C_RESET}${hwid_display}  ${C_DIM}App=${C_RESET}${app_display}"
+        # Compact two-column CURRENT SETTINGS panel. Absolute cursor columns keep
+        # emoji labels aligned regardless of glyph width; long values (HWID) get a
+        # full-width row so they can never collide with the right border.
+        local _ptop="" _pbot="" _pi
+        for ((_pi=0;_pi<48;_pi++)); do _ptop+="─"; done
+        for ((_pi=0;_pi<67;_pi++)); do _pbot+="─"; done
+        local _left_cell
+        if [[ "$_days_disp" == "Expired" ]]; then
+            _left_cell="${C_RED}Expired${C_RESET}"
+        elif [[ "$_days_disp" == "Never" || "$_days_disp" == "N/A" ]]; then
+            _left_cell="${C_YELLOW}${_days_disp}${C_RESET}"
+        else
+            _left_cell="${C_CYAN}${_days_disp} left${C_RESET}"
+        fi
+        local _hwid_icon="🔓" _hwid_cell="${C_DIM}none (multi-device)${C_RESET}"
+        if [[ -n "$cur_hwid" ]]; then
+            _hwid_icon="🔒"
+            # Compact summary for the panel; the full device list stays in the
+            # Add/Remove/Toggle menus so long HWIDs can't overflow the box.
+            _ff_hwid_parse "$cur_hwid"
+            local _htot=${#FF_HWID_IDS[@]} _hen=0 _hi _hst="off"
+            for _hi in "${!FF_HWID_STATES[@]}"; do [[ "${FF_HWID_STATES[$_hi]}" == "on" ]] && _hen=$((_hen+1)); done
+            [[ "$cur_strict" == "1" ]] && _hst="ON"
+            if (( _htot == 1 )); then _hwid_cell="${C_YELLOW}1 device${C_RESET}"; else _hwid_cell="${C_YELLOW}${_htot} devices${C_RESET}"; fi
+            (( _hen < _htot )) && _hwid_cell+=" ${C_DIM}(${_hen} enabled)${C_RESET}"
+            _hwid_cell+=" ${C_DIM}· strict ${_hst}${C_RESET}"
+        fi
+        echo -e "\n  ${C_PURPLE}╭─ ${C_BOLD}CURRENT SETTINGS${C_RESET}${C_PURPLE} ${_ptop}╮${C_RESET}"
+        printf '  %s│%s\033[5G🔑\033[8G%sPassword%s\033[23G%s%s%s\033[40G📱\033[43G%sApp%s\033[57G%s\033[71G%s│%s\n' \
+            "$C_PURPLE" "$C_RESET" "$C_DIM" "$C_RESET" "$C_YELLOW" "$cur_pass" "$C_RESET" "$C_DIM" "$C_RESET" "$app_display" "$C_PURPLE" "$C_RESET"
+        printf '  %s│%s\033[5G🗓️\033[8G%sExpires%s\033[23G%s%s%s\033[40G⏳\033[43G%sLeft%s\033[57G%s\033[71G%s│%s\n' \
+            "$C_PURPLE" "$C_RESET" "$C_DIM" "$C_RESET" "$C_YELLOW" "$cur_expiry" "$C_RESET" "$C_DIM" "$C_RESET" "$_left_cell" "$C_PURPLE" "$C_RESET"
+        printf '  %s│%s\033[5G📶\033[8G%sConn Limit%s\033[23G%s%s%s\033[40G📦\033[43G%sBandwidth%s\033[57G%s%s%s\033[71G%s│%s\n' \
+            "$C_PURPLE" "$C_RESET" "$C_DIM" "$C_RESET" "$C_YELLOW" "$cur_limit" "$C_RESET" "$C_DIM" "$C_RESET" "$C_YELLOW" "$cur_bw_display" "$C_RESET" "$C_PURPLE" "$C_RESET"
+        printf '  %s│%s\033[5G📊\033[8G%sUsed%s\033[23G%s%s%s\033[71G%s│%s\n' \
+            "$C_PURPLE" "$C_RESET" "$C_DIM" "$C_RESET" "$C_CYAN" "$bw_used_display" "$C_RESET" "$C_PURPLE" "$C_RESET"
+        printf '  %s│%s\033[5G%s\033[8G%sHWID%s\033[23G%s\033[71G%s│%s\n' \
+            "$C_PURPLE" "$C_RESET" "$_hwid_icon" "$C_DIM" "$C_RESET" "$_hwid_cell" "$C_PURPLE" "$C_RESET"
+        echo -e "  ${C_PURPLE}╰${_pbot}╯${C_RESET}"
         echo -e "\nSelect a detail to edit:\n"
         printf "  ${C_GREEN}[ 1]${C_RESET} %-35s\n" "🔑 Change Password"
         printf "  ${C_GREEN}[ 2]${C_RESET} %-35s\n" "🗓️ Change Expiration Date"
@@ -2733,16 +2846,29 @@ edit_user() {
                     echo -e "\n${C_GREEN}✅ Password for '$username' changed to: ${C_YELLOW}$new_pass${C_RESET}"
                 fi
                ;;
-            2) read -p "Enter new duration (in days from today): " days
-               if [[ "$days" =~ ^[0-9]+$ ]]; then
-                   local new_expire_date; new_expire_date=$(date -d "+$days days" +%Y-%m-%d); chage -E "$new_expire_date" "$username"
-                   # Manually setting a date promotes a trial to a normal account:
-                   # drop the trial marker and its precise-expiry timestamp.
-                   rm -f "$TRIAL_EXPIRY_DIR/${username}.ts"
+            2) read -r -p "🗓️ new duration (e.g. 20d5h30m) [30d]: " duration_input
+               duration_input=${duration_input:-30d}
+               local duration_secs; duration_secs=$(_ff_dur_to_seconds "$duration_input")
+               if [[ "$duration_secs" -le 0 ]]; then
+                   echo -e "\n${C_RED}❌ Invalid duration. Use e.g. 30m, 2h, 1d, 2d4h30m.${C_RESET}"
+               else
+                   local duration_display; duration_display=$(expiry_human_left "$duration_secs")
+                   # chage only accepts a date; round UP to the calendar date of the
+                   # true cutoff so the shadow expiry can never fire early. The precise
+                   # .ts timestamp (written below) enforces the exact sub-day moment.
+                   local new_expire_date; new_expire_date=$(date -d "+${duration_secs} seconds" +%Y-%m-%d)
+                   [[ "$new_expire_date" == "$(date +%Y-%m-%d)" ]] && new_expire_date=$(date -d "tomorrow" +%Y-%m-%d)
+                   local expiry_epoch=$(( $(date +%s) + duration_secs ))
+                   chage -E "$new_expire_date" "$username"
+                   # Setting a duration promotes a trial to a normal account: drop the
+                   # trial marker, then rewrite the precise-expiry timestamp for the new
+                   # duration (same as Create User / Renew).
                    cur_marker=""
                     db_set_user "$username" "$cur_pass" "$new_expire_date" "$cur_limit" "$cur_bw" "$cur_marker" "$cur_hwid" "$cur_strict" "$cur_app"
-                    echo -e "\n${C_GREEN}✅ Expiration for '$username' set to ${C_YELLOW}$new_expire_date${C_RESET}."
-               else echo -e "\n${C_RED}❌ Invalid number of days.${C_RESET}"; fi ;;
+                   mkdir -p "$TRIAL_EXPIRY_DIR"
+                   printf '%s\n' "$expiry_epoch" > "$TRIAL_EXPIRY_DIR/${username}.ts"
+                    echo -e "\n${C_GREEN}✅ Expiration for '$username' set to ${C_YELLOW}$new_expire_date${C_RESET}  (${C_CYAN}$duration_display${C_RESET})."
+               fi ;;
             3) read -p "Enter new simultaneous connection limit: " new_limit
                if [[ "$new_limit" =~ ^[0-9]+$ ]]; then
                     db_set_user "$username" "$cur_pass" "$cur_expiry" "$new_limit" "$cur_bw" "$cur_marker" "$cur_hwid" "$cur_strict" "$cur_app"
@@ -3438,7 +3564,7 @@ list_users() {
     refresh_ssh_session_cache
 
     local total_users=0 active_count=0 quota_exceeded=0 expired_count=0 locked_hwid=0 paused_count=0
-    local idx=0
+    local idx=0 _trial_divider_shown=0
 
     while IFS=: read -r user pass expiry limit bandwidth_gb marker user_hwid strict app; do
         ((total_users++)); ((idx++))
@@ -3583,10 +3709,17 @@ list_users() {
             "Not Found") line_color="$C_DIM" ;;
         esac
 
-        # Trial accounts stand out: distinct emoji + colour when active.
-        if [[ "$plain_status" == "Active" && "$marker" == "trial" ]]; then
-            status="${C_YELLOW}⏳ Active${C_RESET}"
-            line_color="$C_YELLOW"
+        # Trial accounts stand out: purple row so you can eyeball exactly where the
+        # trial section begins (trials also sort to the bottom of the list).
+        if [[ "$marker" == "trial" ]]; then
+            line_color="$C_PURPLE"
+            [[ "$plain_status" == "Active" ]] && status="${C_YELLOW}⏳ Active${C_RESET}"
+            if [[ "$_trial_divider_shown" != "1" ]]; then
+                _trial_divider_shown=1
+                echo -e "${PAD}${C_PURPLE}${rule_d}${C_RESET}"
+                echo -e "${PAD}  ${C_PURPLE}⏳ TRIAL ACCOUNTS${C_RESET} ${C_DIM}(auto-expiring)${C_RESET}"
+                echo -e "${PAD}${C_PURPLE}${rule_d}${C_RESET}"
+            fi
         fi
 
         printf '\033[%dG%s\033[%dG%s\033[%dG%s\033[%dG%s\033[%dG%s\033[%dG%s\033[%dG%s\033[%dG%s\033[%dG%s\033[%dG%s\033[%dG%s\033[K\n' \
@@ -3601,7 +3734,7 @@ list_users() {
                 "$((LEAD+48))" "${bw_dot}" \
                 "$((LEAD+55))" "${C_DIM}│${C_RESET}" \
                 "$((LEAD+57))" "${C_GREEN}${expires_display}${C_RESET}"
-    done < <(sort "$DB_FILE")
+    done < <(LC_ALL=C sort -t: -k6,6 -k1,1 "$DB_FILE")
 
     # Footer stats — 2x2 summary grid
     echo -e "${PAD}${C_BOLD}${C_PURPLE}╔${rule_e}╗${C_RESET}"
@@ -11133,5 +11266,6 @@ if [[ "$1" == "--install-setup" ]]; then
 fi
 
 require_interactive_terminal
+vss_license_gate
 sync_runtime_components_if_needed
 main_menu
