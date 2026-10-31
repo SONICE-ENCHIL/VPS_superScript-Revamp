@@ -208,6 +208,7 @@ APT_CACHE_READY=0
 FF_USERS_GROUP="ffusers"
 declare -A SSH_SESSION_COUNTS=()
 declare -A SSH_SESSION_PIDS=()
+declare -A FF_TRIAL_USERS=()
 
 # --- Package Manager Abstraction ---
 FF_PKG_MGR=""
@@ -779,6 +780,25 @@ db_set_user() {
 db_get_field() {
     [[ -f "$DB_FILE" ]] || { echo ""; return 1; }
     awk -F: -v u="$1" -v n="$2" '$1 == u { print $n; exit }' "$DB_FILE"
+}
+
+# Populate FF_TRIAL_USERS from users.db. Field 6 is the account marker; only
+# auto-expiring trial accounts carry "trial". The user pickers use this to
+# colour trials purple and keep them at the bottom of every list.
+_ff_load_trial_users() {
+    FF_TRIAL_USERS=()
+    [[ -s "$DB_FILE" ]] || return 0
+    local _u _m
+    while IFS=: read -r _u _ _ _ _ _m _; do
+        [[ -n "$_u" && "$_m" == "trial" ]] && FF_TRIAL_USERS["$_u"]=1
+    done < "$DB_FILE"
+}
+
+# Usernames in stable display order: normal accounts first, trials last, each
+# group sorted by name. Mirrors the ordering used by list_users().
+_ff_sorted_user_names() {
+    [[ -s "$DB_FILE" ]] || return 0
+    LC_ALL=C sort -t: -k6,6 -k1,1 "$DB_FILE" | cut -d: -f1
 }
 
 # Regenerate the enforcer's runtime mirror from users.db, keeping only rows that
@@ -2157,7 +2177,8 @@ _select_user_interface() {
         SELECTED_USER="NO_USERS"; return
     fi
     
-    mapfile -t all_users < <(cut -d: -f1 "$DB_FILE" | sort)
+    _ff_load_trial_users
+    mapfile -t all_users < <(_ff_sorted_user_names)
     local -A all_user_lookup=()
     local username
     for username in "${all_users[@]}"; do
@@ -2180,8 +2201,11 @@ _select_user_interface() {
         SELECTED_USER="NO_USERS"; return
     fi
     echo -e "\nPlease select a user:\n"
+    local _disp_user
     for i in "${!users[@]}"; do
-        printf "  ${C_GREEN}[%2d]${C_RESET} %s\n" "$((i+1))" "${users[$i]}"
+        _disp_user="${users[$i]}"
+        [[ -n "${FF_TRIAL_USERS[$_disp_user]+x}" ]] && _disp_user="${C_PURPLE}${_disp_user}${C_RESET}"
+        printf "  ${C_GREEN}[%2d]${C_RESET} %s\n" "$((i+1))" "$_disp_user"
     done
     echo -e "\n  ${C_RED} [ 0]${C_RESET} ↩️ Cancel"
     echo -e "${C_CYAN}💡 Tip: you can also type the exact username directly.${C_RESET}"
@@ -2219,20 +2243,33 @@ _select_multi_user_interface() {
     local -A orphan_user_lookup=()
     local username
 
+    _ff_load_trial_users
     if [[ -s $DB_FILE ]]; then
-        mapfile -t all_users < <(cut -d: -f1 "$DB_FILE" | sort)
+        mapfile -t all_users < <(_ff_sorted_user_names)
     fi
 
     if [[ "$include_orphan_users" == "true" ]]; then
+        # Orphans are system-only accounts (never trials), so merge and sort them
+        # with the normal group and keep trial accounts at the very bottom.
+        local -a _normals=() _trials=()
+        for username in "${all_users[@]}"; do
+            if [[ -n "${FF_TRIAL_USERS[$username]+x}" ]]; then _trials+=("$username"); else _normals+=("$username"); fi
+        done
         mapfile -t orphan_users < <(get_VPS_superScript_orphan_users)
         for username in "${orphan_users[@]}"; do
             orphan_user_lookup["$username"]=1
             if ! printf "%s\n" "${all_users[@]}" | grep -Fxq "$username"; then
-                all_users+=("$username")
+                _normals+=("$username")
             fi
         done
-        if [[ ${#all_users[@]} -gt 0 ]]; then
-            mapfile -t all_users < <(printf "%s\n" "${all_users[@]}" | sort)
+        all_users=()
+        if [[ ${#_normals[@]} -gt 0 ]]; then
+            mapfile -t _normals < <(printf "%s\n" "${_normals[@]}" | LC_ALL=C sort)
+            all_users+=("${_normals[@]}")
+        fi
+        if [[ ${#_trials[@]} -gt 0 ]]; then
+            mapfile -t _trials < <(printf "%s\n" "${_trials[@]}" | LC_ALL=C sort)
+            all_users+=("${_trials[@]}")
         fi
     fi
 
@@ -2269,6 +2306,7 @@ _select_multi_user_interface() {
         if [[ "$include_orphan_users" == "true" && -n "${orphan_user_lookup[${users[$i]}]+x}" ]]; then
             display_user="${display_user} ${C_DIM}(system-only)${C_RESET}"
         fi
+        [[ -n "${FF_TRIAL_USERS[${users[$i]}]+x}" ]] && display_user="${C_PURPLE}${display_user}${C_RESET}"
         printf "  ${C_GREEN}[%2d]${C_RESET} %s\n" "$((i+1))" "$display_user"
     done
     echo -e "\n  ${C_GREEN}[all]${C_RESET} Select ALL listed users"
