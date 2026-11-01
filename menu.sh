@@ -8908,14 +8908,14 @@ access_hub() {
         _hub_item "1" "🎨 SSH Banner"         "Set the login banner"
         _hub_item "2" "🔞 Content Filter"     "Block/allow content categories"
         _hub_item "3" "🚫 Bypass Proxy"       "Manage proxy bypass rules"
-        _hub_item "4" "👑 Grant Root"         "Grant root to a user"
+        _hub_item "4" "👑 Grant Root"         "Grant sudo + SSH shell access"
         _hub_footer
         read -r -p "$(echo -e ${C_PROMPT}"👉 Select an option: "${C_RESET})" choice || return
         case $choice in
             1) ssh_banner_menu ;;
             2) content_filter_menu ;;
             3) bypass_proxy_menu; press_enter ;;
-            4) grant_root_menu; press_enter ;;
+            4) grant_root_menu ;;
             0) return ;;
             *) invalid_option ;;
         esac
@@ -10786,46 +10786,225 @@ bypass_proxy_menu() {
 }
 
 # ── Grant Root ────────────────────────────────────────────
-grant_root_menu() {
-    clear; show_banner
-    echo -e "${C_BOLD}${C_PURPLE}--- 👑 Grant/Revoke Root Access ---${C_RESET}"
-    echo -e "\n${C_DIM}Users with sudo/root access:${C_RESET}"
-    local sudo_users=()
-    while IFS=: read -r u _ uid _; do
-        [[ "$uid" == "0" ]] && sudo_users+=("$u (root)")
-    done < /etc/passwd
-    getent group sudo 2>/dev/null | cut -d: -f4 | tr ',' '\n' | while read -r u; do
-        [[ -n "$u" && "$u" != "root" ]] && echo -e "   ${C_GREEN}●${C_RESET} $u (sudo)"
+# Managed VPN accounts are created with /usr/sbin/nologin, so adding them to the
+# sudo group alone does nothing — they cannot obtain a shell to run sudo. This
+# menu grants REAL access by also switching the login shell to bash, and revoke
+# restores nologin so SSH shell access is closed again.
+_gr_sudo_group() {
+    local g
+    for g in sudo wheel; do
+        getent group "$g" >/dev/null 2>&1 && { printf '%s' "$g"; return 0; }
     done
-    echo -e "\n${C_BOLD}Options:${C_RESET}\n"
-    printf "  ${C_CHOICE}[ 1]${C_RESET} %-40s\n" "➕ Grant sudo access to a user"
-    printf "  ${C_CHOICE}[ 2]${C_RESET} %-40s\n" "➖ Revoke sudo access from a user"
-    printf "  ${C_CHOICE}[ 3]${C_RESET} %-40s\n" "📋 List all sudo users"
-    echo -e "\n  ${C_WARN}[ 0]${C_RESET} ↩️ Return"
-    echo
-    read -p "👉 Select an option: " gr_choice
-    case $gr_choice in
-        1)
-            read -p "👉 Username to grant sudo: " gr_user
-            if id "$gr_user" &>/dev/null; then
-                usermod -aG sudo "$gr_user" 2>/dev/null || usermod -aG wheel "$gr_user" 2>/dev/null
-                echo -e "${C_GREEN}✅ Sudo granted to '$gr_user'.${C_RESET}"
-            else
-                echo -e "${C_RED}❌ User '$gr_user' does not exist.${C_RESET}"
+    return 1
+}
+_gr_user_shell() {
+    getent passwd "$1" 2>/dev/null | cut -d: -f7
+}
+_gr_in_group() {
+    id -nG "$1" 2>/dev/null | tr ' ' '\n' | grep -Fxq "$2"
+}
+_gr_nopasswd_file() {
+    local safe; safe=$(printf '%s' "$1" | tr -c 'A-Za-z0-9_-' '_')
+    printf '/etc/sudoers.d/90-vss-%s' "$safe"
+}
+_gr_nologin_shell() {
+    local s
+    for s in /usr/sbin/nologin /sbin/nologin; do
+        [[ -x "$s" ]] && { printf '%s' "$s"; return 0; }
+    done
+    command -v nologin 2>/dev/null
+}
+
+grant_root_menu() {
+    local grp; grp=$(_gr_sudo_group)
+    local _login_shell=/bin/bash
+    [[ -x "$_login_shell" ]] || _login_shell=$(command -v bash 2>/dev/null)
+    local _nologin_shell; _nologin_shell=$(_gr_nologin_shell)
+    [[ -n "$_nologin_shell" ]] || _nologin_shell=/usr/sbin/nologin
+
+    while true; do
+        clear; show_banner
+        echo -e "${C_BOLD}${C_PURPLE}--- 👑 Grant/Revoke Root Access ---${C_RESET}"
+        if [[ -z "$grp" ]]; then
+            echo -e "\n${C_RED}❌ Neither a 'sudo' nor 'wheel' group exists on this host.${C_RESET}"
+            press_enter; return
+        fi
+        echo -e "${C_DIM}Administrative group: ${C_YELLOW}${grp}${C_RESET}"
+
+        echo -e "\n${C_BOLD}Users with root/sudo access:${C_RESET}"
+        local _any_admin=false _au _ashell
+        while IFS=: read -r _au _ _ _uid _; do
+            if [[ "$_uid" == "0" ]]; then
+                echo -e "   ${C_GREEN}●${C_RESET} ${_au} ${C_DIM}(uid 0)${C_RESET}"
+                _any_admin=true
             fi
-            press_enter ;;
-        2)
-            read -p "👉 Username to revoke sudo: " rv_user
-            gpasswd -d "$rv_user" sudo 2>/dev/null || gpasswd -d "$rv_user" wheel 2>/dev/null
-            echo -e "${C_YELLOW}✅ Sudo revoked from '$rv_user'.${C_RESET}"
-            press_enter ;;
-        3)
-            echo -e "\n${C_CYAN}Sudo users:${C_RESET}"
-            getent group sudo 2>/dev/null | cut -d: -f4 | tr ',' '\n' | while read -r u; do [[ -n "$u" ]] && echo "   $u"; done
-            press_enter ;;
-        0) return ;;
-        *) invalid_option ;;
-    esac
+        done < /etc/passwd
+        while IFS= read -r _au; do
+            [[ -z "$_au" || "$_au" == "root" ]] && continue
+            _ashell=$(_gr_user_shell "$_au")
+            echo -e "   ${C_GREEN}●${C_RESET} ${_au} ${C_DIM}(${grp}, shell: ${_ashell:-?})${C_RESET}"
+            _any_admin=true
+        done < <(getent group "$grp" 2>/dev/null | cut -d: -f4 | tr ',' '\n')
+        [[ "$_any_admin" == "false" ]] && echo -e "   ${C_DIM}none${C_RESET}"
+
+        echo -e "\n${C_BOLD}Options:${C_RESET}\n"
+        printf "  ${C_CHOICE}[ 1]${C_RESET} %-46s\n" "➕ Grant sudo + SSH shell to a user"
+        printf "  ${C_CHOICE}[ 2]${C_RESET} %-46s\n" "➖ Revoke sudo + SSH shell from a user"
+        printf "  ${C_CHOICE}[ 3]${C_RESET} %-46s\n" "📋 List all sudo users"
+        printf "  ${C_CHOICE}[ 4]${C_RESET} %-46s\n" "🔓 Toggle passwordless (NOPASSWD) sudo"
+        echo -e "\n  ${C_WARN}[ 0]${C_RESET} ↩️ Return"
+        echo
+        read -r -p "👉 Select an option: " gr_choice || return
+        case $gr_choice in
+            1)
+                local gr_user _cur_shell _ok _fail
+                read -r -p "👉 Username to grant sudo: " gr_user
+                gr_user=$(printf '%s' "$gr_user" | tr -d '[:space:]')
+                if [[ -z "$gr_user" ]]; then
+                    echo -e "\n${C_YELLOW}⚠️ No username entered.${C_RESET}"
+                elif ! id "$gr_user" &>/dev/null; then
+                    echo -e "\n${C_RED}❌ User '$gr_user' does not exist on this server.${C_RESET}"
+                elif [[ "$gr_user" == "root" ]]; then
+                    echo -e "\n${C_YELLOW}ℹ️ 'root' already has full access.${C_RESET}"
+                elif [[ -z "$_login_shell" || ! -x "$_login_shell" ]]; then
+                    echo -e "\n${C_RED}❌ bash is not installed — cannot enable an SSH shell.${C_RESET}"
+                else
+                    _cur_shell=$(_gr_user_shell "$gr_user")
+                    echo -e "\n${C_DIM}This will add '${gr_user}' to '${grp}' and set the login shell to ${_login_shell}.${C_RESET}"
+                    echo -e "${C_DIM}They can then log in over SSH with their password and run: sudo -i${C_RESET}"
+                    read -r -p "👉 Proceed? (y/N): " _ok
+                    if [[ "${_ok,,}" != "y" ]]; then
+                        echo -e "\n${C_YELLOW}❌ Cancelled.${C_RESET}"
+                    else
+                        _fail=false
+                        if usermod -aG "$grp" "$gr_user" 2>/dev/null && _gr_in_group "$gr_user" "$grp"; then
+                            echo -e " ${C_GREEN}✅${C_RESET} Added '${gr_user}' to '${grp}'."
+                        else
+                            echo -e " ${C_RED}❌ Could not add '${gr_user}' to '${grp}'.${C_RESET}"; _fail=true
+                        fi
+                        if usermod -s "$_login_shell" "$gr_user" 2>/dev/null && [[ "$(_gr_user_shell "$gr_user")" == "$_login_shell" ]]; then
+                            echo -e " ${C_GREEN}✅${C_RESET} Login shell set to ${_login_shell} ${C_DIM}(was: ${_cur_shell:-unknown})${C_RESET}"
+                        else
+                            echo -e " ${C_RED}❌ Could not change the login shell.${C_RESET}"; _fail=true
+                        fi
+                        if [[ "$_fail" == "false" ]]; then
+                            echo -e "\n${C_GREEN}✅ '${gr_user}' now has full root access via SSH + sudo.${C_RESET}"
+                            echo -e "${C_DIM}   Test: ssh ${gr_user}@<server-ip>  →  sudo -i${C_RESET}"
+                            if _ff_is_shadow_locked "$gr_user"; then
+                                echo -e "${C_YELLOW}⚠️ This account is currently LOCKED — unlock it (Users → Unlock) or they cannot log in.${C_RESET}"
+                            fi
+                            local _expd _today
+                            _expd=$(awk -F: -v u="$gr_user" '$1==u{print $8; exit}' /etc/shadow 2>/dev/null)
+                            _today=$(( $(date +%s) / 86400 ))
+                            if [[ "$_expd" =~ ^[0-9]+$ ]] && (( _expd < _today )); then
+                                echo -e "${C_YELLOW}⚠️ This account EXPIRED on $(date -d "@$((_expd * 86400))" '+%Y-%m-%d' 2>/dev/null || echo "$_expd") — renew it before they can log in.${C_RESET}"
+                            fi
+                        fi
+                    fi
+                fi
+                ;;
+            2)
+                local rv_user _rshell _rok _rfail
+                read -r -p "👉 Username to revoke sudo: " rv_user
+                rv_user=$(printf '%s' "$rv_user" | tr -d '[:space:]')
+                if [[ -z "$rv_user" ]]; then
+                    echo -e "\n${C_YELLOW}⚠️ No username entered.${C_RESET}"
+                elif ! id "$rv_user" &>/dev/null; then
+                    echo -e "\n${C_RED}❌ User '$rv_user' does not exist on this server.${C_RESET}"
+                elif [[ "$rv_user" == "root" ]]; then
+                    echo -e "\n${C_RED}❌ Refusing to modify 'root'.${C_RESET}"
+                else
+                    _rshell=$(_gr_user_shell "$rv_user")
+                    echo -e "\n${C_DIM}This will remove '${rv_user}' from '${grp}', delete its NOPASSWD rule,${C_RESET}"
+                    echo -e "${C_DIM}and set the login shell back to ${_nologin_shell} (SSH shell closed).${C_RESET}"
+                    read -r -p "👉 Proceed? (y/N): " _rok
+                    if [[ "${_rok,,}" != "y" ]]; then
+                        echo -e "\n${C_YELLOW}❌ Cancelled.${C_RESET}"
+                    else
+                        _rfail=false
+                        if _gr_in_group "$rv_user" "$grp"; then
+                            if gpasswd -d "$rv_user" "$grp" >/dev/null 2>&1; then
+                                echo -e " ${C_GREEN}✅${C_RESET} Removed '${rv_user}' from '${grp}'."
+                            else
+                                echo -e " ${C_RED}❌ Could not remove '${rv_user}' from '${grp}'.${C_RESET}"; _rfail=true
+                            fi
+                        else
+                            echo -e " ${C_DIM}ℹ️ '${rv_user}' is not in '${grp}'.${C_RESET}"
+                        fi
+                        local _np; _np=$(_gr_nopasswd_file "$rv_user")
+                        if [[ -f "$_np" ]]; then
+                            if rm -f "$_np" 2>/dev/null; then
+                                echo -e " ${C_GREEN}✅${C_RESET} Removed NOPASSWD sudo rule (${_np})."
+                            else
+                                echo -e " ${C_RED}❌ Could not remove ${_np}.${C_RESET}"; _rfail=true
+                            fi
+                        fi
+                        if usermod -s "$_nologin_shell" "$rv_user" 2>/dev/null && [[ "$(_gr_user_shell "$rv_user")" == "$_nologin_shell" ]]; then
+                            echo -e " ${C_GREEN}✅${C_RESET} Login shell reset to ${_nologin_shell} ${C_DIM}(was: ${_rshell:-unknown})${C_RESET}"
+                        else
+                            echo -e " ${C_RED}❌ Could not reset the login shell.${C_RESET}"; _rfail=true
+                        fi
+                        if [[ "$_rfail" == "false" ]]; then
+                            echo -e "\n${C_GREEN}✅ '${rv_user}' can no longer log in to a shell (sudo access removed).${C_RESET}"
+                        fi
+                    fi
+                fi
+                ;;
+            3)
+                echo -e "\n${C_CYAN}Users with root/sudo access:${C_RESET}"
+                local _lu _lsh
+                while IFS=: read -r _lu _ _ _luid _; do
+                    [[ "$_luid" == "0" ]] && echo -e "   ${C_GREEN}●${C_RESET} ${_lu} ${C_DIM}(uid 0)${C_RESET}"
+                done < /etc/passwd
+                while IFS= read -r _lu; do
+                    [[ -z "$_lu" ]] && continue
+                    _lsh=$(_gr_user_shell "$_lu")
+                    echo -e "   ${C_GREEN}●${C_RESET} ${_lu} ${C_DIM}(${grp}, shell: ${_lsh:-?})${C_RESET}"
+                done < <(getent group "$grp" 2>/dev/null | cut -d: -f4 | tr ',' '\n')
+                ;;
+            4)
+                local pw_user _pnp
+                read -r -p "👉 Username for passwordless sudo: " pw_user
+                pw_user=$(printf '%s' "$pw_user" | tr -d '[:space:]')
+                if [[ -z "$pw_user" ]]; then
+                    echo -e "\n${C_YELLOW}⚠️ No username entered.${C_RESET}"
+                elif ! id "$pw_user" &>/dev/null; then
+                    echo -e "\n${C_RED}❌ User '$pw_user' does not exist on this server.${C_RESET}"
+                elif ! _gr_in_group "$pw_user" "$grp"; then
+                    echo -e "\n${C_YELLOW}⚠️ '${pw_user}' is not in '${grp}' — grant sudo access first ([1]).${C_RESET}"
+                else
+                    _pnp=$(_gr_nopasswd_file "$pw_user")
+                    if [[ -f "$_pnp" ]]; then
+                        rm -f "$_pnp" && echo -e "\n${C_GREEN}✅ NOPASSWD sudo DISABLED for '${pw_user}' (password required again).${C_RESET}"
+                    else
+                        local _ptmp; _ptmp=$(mktemp) || { echo -e "\n${C_RED}❌ Could not create a temp file.${C_RESET}"; _ptmp=""; }
+                        if [[ -n "$_ptmp" ]]; then
+                            printf '%s ALL=(ALL) NOPASSWD:ALL\n' "$pw_user" > "$_ptmp"
+                            if command -v visudo &>/dev/null && ! visudo -cf "$_ptmp" >/dev/null 2>&1; then
+                                echo -e "\n${C_RED}❌ Generated rule failed visudo validation — nothing changed.${C_RESET}"
+                            else
+                                mkdir -p /etc/sudoers.d
+                                if install -m 0440 -o root -g root "$_ptmp" "$_pnp" 2>/dev/null \
+                                   || { cp -f "$_ptmp" "$_pnp" && chmod 0440 "$_pnp"; }; then
+                                    echo -e "\n${C_GREEN}✅ NOPASSWD sudo ENABLED for '${pw_user}' (${_pnp}).${C_RESET}"
+                                    echo -e "${C_DIM}   They can now run: sudo -i   (no password prompt)${C_RESET}"
+                                    if ! grep -Eq '^[[:space:]]*[#@]includedir[[:space:]]+/etc/sudoers\.d' /etc/sudoers 2>/dev/null; then
+                                        echo -e "${C_YELLOW}⚠️ /etc/sudoers does not include /etc/sudoers.d — add: #includedir /etc/sudoers.d${C_RESET}"
+                                    fi
+                                else
+                                    echo -e "\n${C_RED}❌ Could not write ${_pnp}.${C_RESET}"
+                                fi
+                            fi
+                            rm -f "$_ptmp"
+                        fi
+                    fi
+                fi
+                ;;
+            0) return ;;
+            *) invalid_option ;;
+        esac
+        press_enter
+    done
 }
 
 # ── Client Details ────────────────────────────────────────
