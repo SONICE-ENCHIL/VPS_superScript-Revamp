@@ -11010,7 +11010,6 @@ list_users_by_owner() {
         [[ "$_any_owner" == "false" ]] && echo -e "   ${C_DIM}none${C_RESET}"
         echo
     done
-    press_enter
 }
 
 grant_root_menu() {
