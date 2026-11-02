@@ -29,6 +29,7 @@ C_ACCENT=$C_ORANGE
 
 DB_DIR="/etc/VPS_superScript"
 DB_FILE="$DB_DIR/users.db"
+OWNER_FILE="$DB_DIR/user_owners.db"
 INSTALL_FLAG_FILE="$DB_DIR/.install"
 BADVPN_SERVICE_FILE="/etc/systemd/system/badvpn.service"
 BADVPN_BUILD_DIR="/root/badvpn-build"
@@ -737,6 +738,8 @@ migrate_from_skylartech() {
 ensure_VPS_superScript_dirs() {
     mkdir -p "$DB_DIR" "$SSL_CERT_DIR" "$BANDWIDTH_DIR" "$TRIAL_EXPIRY_DIR" "$CREATED_DIR" /etc/ssh/sshd_config.d
     touch "$DB_FILE"
+    touch "$OWNER_FILE"
+    chmod 600 "$OWNER_FILE" 2>/dev/null
 }
 
 ensure_VPS_superScript_system_group() {
@@ -790,15 +793,66 @@ _ff_load_trial_users() {
     [[ -s "$DB_FILE" ]] || return 0
     local _u _m
     while IFS=: read -r _u _ _ _ _ _m _; do
-        [[ -n "$_u" && "$_m" == "trial" ]] && FF_TRIAL_USERS["$_u"]=1
+        [[ -n "$_u" && "$_m" == "trial" ]] || continue
+        _own_visible "$_u" && FF_TRIAL_USERS["$_u"]=1
     done < "$DB_FILE"
 }
 
 # Usernames in stable display order: normal accounts first, trials last, each
 # group sorted by name. Mirrors the ordering used by list_users().
+# When VSS_ACTOR is set (delegated admin console) only that owner's users are
+# returned, so admin-created accounts never appear in delegated pickers.
 _ff_sorted_user_names() {
     [[ -s "$DB_FILE" ]] || return 0
-    LC_ALL=C sort -t: -k6,6 -k1,1 "$DB_FILE" | cut -d: -f1
+    local _n
+    while IFS= read -r _n; do
+        [[ -n "$_n" ]] || continue
+        _own_visible "$_n" && printf '%s\n' "$_n"
+    done < <(LC_ALL=C sort -t: -k6,6 -k1,1 "$DB_FILE" | cut -d: -f1)
+}
+
+# ── Delegated-admin ownership ─────────────────────────────
+# user_owners.db maps <username>:<owner>. A missing row means the server owner
+# ("admin") created the account. The owner sees everything; a delegated console
+# runs with VSS_ACTOR=<actor> and only ever sees/touches rows owned by it.
+_own_get() {
+    local _o=""
+    [[ -f "$OWNER_FILE" ]] && _o=$(awk -F: -v u="$1" '$1==u{print $2; exit}' "$OWNER_FILE" 2>/dev/null)
+    printf '%s' "${_o:-admin}"
+}
+_own_set() { # <user> <owner>
+    local _u="$1" _o="$2" _tmp
+    mkdir -p "$DB_DIR"; touch "$OWNER_FILE"; chmod 600 "$OWNER_FILE" 2>/dev/null
+    _tmp=$(mktemp) || return 1
+    _OWN_U="$_u" _OWN_O="$_o" awk -F: 'BEGIN { OFS=":" }
+        $1 == ENVIRON["_OWN_U"] { $2 = ENVIRON["_OWN_O"]; found=1; print; next }
+        { print }
+        END { if (!found) print ENVIRON["_OWN_U"] ":" ENVIRON["_OWN_O"] }
+    ' "$OWNER_FILE" > "$_tmp" && mv "$_tmp" "$OWNER_FILE"
+    local rc=$?
+    rm -f "$_tmp" 2>/dev/null
+    chmod 600 "$OWNER_FILE" 2>/dev/null
+    return $rc
+}
+_own_remove() {
+    local _u="$1" _tmp
+    [[ -f "$OWNER_FILE" ]] || return 0
+    _tmp=$(mktemp) || return 1
+    awk -F: -v u="$_u" '$1!=u' "$OWNER_FILE" > "$_tmp" && mv "$_tmp" "$OWNER_FILE"
+    rm -f "$_tmp" 2>/dev/null
+    chmod 600 "$OWNER_FILE" 2>/dev/null
+}
+_own_visible() {
+    [[ -z "${VSS_ACTOR:-}" ]] && return 0
+    [[ "$(_own_get "$1")" == "$VSS_ACTOR" ]]
+}
+_own_guard() {
+    _own_visible "$1" && return 0
+    echo -e "\n${C_RED}❌ Access denied: '${1}' is not managed by you.${C_RESET}"
+    return 1
+}
+_ff_valid_managed_username() {
+    [[ "$1" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]]
 }
 
 # Regenerate the enforcer's runtime mirror from users.db, keeping only rows that
@@ -1079,6 +1133,17 @@ delete_VPS_superScript_user_accounts() {
 
     [[ ${#users_to_delete[@]} -gt 0 ]] || return 0
 
+    # Delegated console: silently drop anything not owned by the actor so a
+    # crafted argument list can never delete an admin-created account.
+    if [[ -n "${VSS_ACTOR:-}" ]]; then
+        local -a _allowed=()
+        for username in "${users_to_delete[@]}"; do
+            _own_visible "$username" && _allowed+=("$username")
+        done
+        users_to_delete=("${_allowed[@]}")
+        [[ ${#users_to_delete[@]} -gt 0 ]] || return 0
+    fi
+
     for username in "${users_to_delete[@]}"; do
         [[ -n "$username" ]] || continue
         local _del_app
@@ -1138,6 +1203,7 @@ delete_VPS_superScript_user_accounts() {
         rm -f "$TRIAL_EXPIRY_DIR/${username}.ts"
         rm -f "$CREATED_DIR/${username}"
         rm -f "$ZIVPN_LOCK_DIR/${username}"
+        _own_remove "$username"
     done
 
     # Reload ZiVPN so any removed passwords take effect immediately.
@@ -2234,6 +2300,8 @@ _select_user_interface() {
 _select_multi_user_interface() {
     local title="$1"
     local include_orphan_users="${2:-false}"
+    # Delegated admins may never see or touch unmanaged/orphan system accounts.
+    [[ -n "${VSS_ACTOR:-}" ]] && include_orphan_users=false
     clear; show_banner
     echo -e "${C_BOLD}${C_PURPLE}${title}${C_RESET}\n"
     SELECTED_USERS=()
@@ -2414,12 +2482,20 @@ create_user() {
         echo -e "\n${C_RED}❌ Error: Username cannot be empty.${C_RESET}"
         return
     fi
+    if [[ -n "${VSS_ACTOR:-}" ]] && ! _ff_valid_managed_username "$username"; then
+        echo -e "\n${C_RED}❌ Invalid username. Use 2-32 chars: a-z, 0-9, '_' or '-' (must start with a letter/underscore).${C_RESET}"
+        return
+    fi
     if db_has_user "$username"; then
         echo -e "\n${C_RED}❌ Error: User '$username' already exists in VPS_superScript.${C_RESET}"
         return
     fi
     if id "$username" &>/dev/null; then
         if is_VPS_superScript_orphan_user "$username"; then
+            if [[ -n "${VSS_ACTOR:-}" ]]; then
+                echo -e "\n${C_RED}❌ That existing system account is not managed by you. Ask the server owner to adopt it.${C_RESET}"
+                return
+            fi
             echo -e "\n${C_YELLOW}⚠️ User '$username' already exists on the system but is missing from users.db.${C_RESET}"
             echo -e "${C_DIM}This usually happens after uninstalling the script without deleting the SSH users.${C_RESET}"
             read -p "👉 Do you want to take control of this existing user and manage it with VPS_superScript? (y/n): " adopt_confirm
@@ -2514,6 +2590,7 @@ create_user() {
     # Fields: user:pass:expiry:limit:bw:marker:hwid:strict
     # 6th field is the account marker: empty = normal account, "trial" = auto-expiring trial.
     echo "$username:$password:$expire_date:$limit:$bandwidth_gb::$hwid:$strict:$app" >> "$DB_FILE"
+    [[ -n "${VSS_ACTOR:-}" ]] && _own_set "$username" "$VSS_ACTOR"
     # Record creation time shown in User Details (falls back to home-dir date if absent).
     mkdir -p "$CREATED_DIR"; printf '%s\n' "$(date +%s)" > "$CREATED_DIR/${username}"
     # Precise expiry timestamp so sub-day durations end on time; the limiter
@@ -2687,6 +2764,7 @@ view_user_details() {
     _select_user_interface "--- 👁️ View User Details ---"
     local username=$SELECTED_USER
     if [[ "$username" == "NO_USERS" ]] || [[ -z "$username" ]]; then return; fi
+    _own_guard "$username" || return
 
     clear; show_banner
     echo -e "${C_BOLD}${C_PURPLE}--- 👁️ User Details: ${C_YELLOW}$username${C_PURPLE} ---${C_RESET}"
@@ -2771,6 +2849,7 @@ edit_user() {
     _select_user_interface "--- ✏️ Edit a User ---"
     local username=$SELECTED_USER
     if [[ "$username" == "NO_USERS" ]] || [[ -z "$username" ]]; then return; fi
+    _own_guard "$username" || return
     while true; do
         clear; show_banner; echo -e "${C_BOLD}${C_PURPLE}--- Editing User: ${C_YELLOW}$username${C_PURPLE} ---${C_RESET}"
         
@@ -3362,6 +3441,7 @@ lock_user() {
     echo -e "\n${C_BLUE}🔒 Locking selected users...${C_RESET}"
     local any_locked=false zivpn_changed=false
     for u in "${SELECTED_USERS[@]}"; do
+        _own_guard "$u" || continue
         if ! id "$u" &>/dev/null; then
              echo -e " ❌ User '${C_YELLOW}$u${C_RESET}' does not exist on this system."
              continue
@@ -3411,6 +3491,7 @@ unlock_user() {
     local share_locks="$DB_DIR/udp_share.locks"
     local now_ts; printf -v now_ts '%(%s)T' -1
     for u in "${SELECTED_USERS[@]}"; do
+        _own_guard "$u" || continue
         if ! id "$u" &>/dev/null; then
              echo -e " ❌ User '${C_YELLOW}$u${C_RESET}' does not exist on this system."
              continue
@@ -3605,6 +3686,7 @@ list_users() {
     local idx=0 _trial_divider_shown=0
 
     while IFS=: read -r user pass expiry limit bandwidth_gb marker user_hwid strict app; do
+        _own_visible "$user" || continue
         ((total_users++)); ((idx++))
 
         local online_count="${SSH_SESSION_COUNTS[$user]:-0}"
@@ -3795,6 +3877,7 @@ renew_user() {
     
     echo -e "\n${C_BLUE}🔄 Renewing selected users for $duration_input (${C_CYAN}$duration_display${C_BLUE})...${C_RESET}"
     for u in "${SELECTED_USERS[@]}"; do
+        _own_guard "$u" || continue
         chage -E "$new_expire_date" "$u"
         local line pass _expiry limit bw marker hwid strict app
         line=$(grep "^$u:" "$DB_FILE")
@@ -3830,6 +3913,7 @@ cleanup_expired() {
     fi
     
     while IFS=: read -r user pass expiry limit bandwidth_gb _extra; do
+        _own_visible "$user" || continue
         local expiry_ts
         expiry_ts=$(date -d "$expiry" +%s 2>/dev/null || echo 0)
         
@@ -7419,7 +7503,10 @@ create_trial_account() {
     if id "$username" &>/dev/null || grep -q "^$username:" "$DB_FILE"; then
         echo -e "\n${C_RED}❌ Error: User '$username' already exists.${C_RESET}"; return
     fi
-    
+    if [[ -n "${VSS_ACTOR:-}" ]] && ! _ff_valid_managed_username "$username"; then
+        echo -e "\n${C_RED}❌ Invalid username. Use lowercase letters, numbers, '_' or '-' (must start with a letter/underscore).${C_RESET}"; return
+    fi
+
     # Password
     local password=$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 8)
     read -p "🔑 Password [${password}]: " custom_pass
@@ -7468,6 +7555,7 @@ create_trial_account() {
     fi
     chage -E "$expire_date" "$username"
     echo "$username:$password:$expire_date:$limit:$bandwidth_gb:trial::0:$app" >> "$DB_FILE"
+    [[ -n "${VSS_ACTOR:-}" ]] && _own_set "$username" "$VSS_ACTOR"
     mkdir -p "$CREATED_DIR"; printf '%s\n' "$(date +%s)" > "$CREATED_DIR/${username}"
 
     if [[ "$app" == "zivpn" ]]; then
@@ -7629,6 +7717,9 @@ bulk_create_users() {
     
     read -p "👉 Enter username prefix (e.g., 'user'): " prefix
     if [[ -z "$prefix" ]]; then echo -e "\n${C_RED}❌ Prefix cannot be empty.${C_RESET}"; return; fi
+    if [[ -n "${VSS_ACTOR:-}" ]] && ! _ff_valid_managed_username "$prefix"; then
+        echo -e "\n${C_RED}❌ Invalid prefix. Use lowercase letters, numbers, '_' or '-' (must start with a letter/underscore).${C_RESET}"; return
+    fi
     
     read -p "🔢 How many users to create? " count
     if ! [[ "$count" =~ ^[0-9]+$ ]] || [[ "$count" -lt 1 ]] || [[ "$count" -gt 100 ]]; then
@@ -7691,6 +7782,7 @@ bulk_create_users() {
         fi
         chage -E "$expire_date" "$username"
         echo "$username:$password:$expire_date:$limit:$bandwidth_gb:::0:$app" >> "$DB_FILE"
+        [[ -n "${VSS_ACTOR:-}" ]] && _own_set "$username" "$VSS_ACTOR"
         mkdir -p "$CREATED_DIR"; printf '%s\n' "$(date +%s)" > "$CREATED_DIR/${username}"
         mkdir -p "$TRIAL_EXPIRY_DIR"
         printf '%s\n' "$(( $(date +%s) + duration_secs ))" > "$TRIAL_EXPIRY_DIR/${username}.ts"
@@ -10785,11 +10877,13 @@ bypass_proxy_menu() {
     esac
 }
 
-# ── Grant Root ────────────────────────────────────────────
-# Managed VPN accounts are created with /usr/sbin/nologin, so adding them to the
-# sudo group alone does nothing — they cannot obtain a shell to run sudo. This
-# menu grants REAL access by also switching the login shell to bash, and revoke
-# restores nologin so SSH shell access is closed again.
+# ── Grant/Revoke Access ─────────────────────────────────────
+# Two independent models exist on this server:
+#   • FULL ROOT:    shell (bash) + membership in sudo/wheel → unrestricted root.
+#   • DELEGATION:   restricted user console via /usr/local/bin/vss-subadmin.
+#                   Delegates can create/edit/renew/lock/unlock/delete ONLY
+#                   accounts they created themselves; admin-created accounts are
+#                   hidden from them. They never get a bash shell or sudo -i.
 _gr_sudo_group() {
     local g
     for g in sudo wheel; do
@@ -10814,6 +10908,110 @@ _gr_nologin_shell() {
     done
     command -v nologin 2>/dev/null
 }
+_gr_deleg_safe() { printf '%s' "$1" | tr -c 'A-Za-z0-9_-' '_'; }
+_gr_deleg_dropin() { printf '/etc/sudoers.d/90-vss-deleg-%s' "$(_gr_deleg_safe "$1")"; }
+_gr_deleg_has_dropin() { [[ -f "$(_gr_deleg_dropin "$1")" ]]; }
+_gr_deleg_wrapper_installed() { [[ -x /usr/local/bin/vss-subadmin ]]; }
+
+# Installs the delegated console binary once. It ignores every argument (ssh -c
+# / sftp subsystem) and always launches menu.sh in --delegate mode as root,
+# deriving the actor from SUDO_USER so it cannot be spoofed.
+_gr_install_deleg_wrapper() {
+    _gr_deleg_wrapper_installed && return 0
+    local self
+    self=$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || true)
+    [[ -n "$self" && -f "$self" ]] || return 1
+    cat > /usr/local/bin/vss-subadmin <<EOF
+#!/bin/bash
+# VPS_superScript delegated user console. Ignores all arguments (ssh -c / sftp).
+if [[ \$EUID -ne 0 ]]; then
+    exec sudo -n /usr/local/bin/vss-subadmin
+fi
+actor="\${SUDO_USER:-}"
+[[ -z "\$actor" || "\$actor" == "root" ]] && exit 1
+exec /bin/bash "$self" --delegate "\$actor"
+EOF
+    chmod 0755 /usr/local/bin/vss-subadmin
+}
+
+delegate_menu() {
+    local actor="${1:-${VSS_ACTOR:-}}"
+    [[ -n "$actor" ]] || return 1
+    while true; do
+        clear; show_banner
+        echo -e "${C_BOLD}${C_PURPLE}--- 👤 Delegated User Manager — ${C_YELLOW}${actor}${C_PURPLE} ---${C_RESET}"
+        echo -e "${C_DIM}You may only manage accounts YOU created.${C_RESET}"
+        echo -e "${C_DIM}Accounts created by the server owner are hidden from you.${C_RESET}\n"
+        printf "  ${C_CHOICE}[ 1]${C_RESET} %-44s\n" "📋 List my users"
+        printf "  ${C_CHOICE}[ 2]${C_RESET} %-44s\n" "✨ Create user"
+        printf "  ${C_CHOICE}[ 3]${C_RESET} %-44s\n" "✏️ Edit user"
+        printf "  ${C_CHOICE}[ 4]${C_RESET} %-44s\n" "🗑️ Delete user"
+        printf "  ${C_CHOICE}[ 5]${C_RESET} %-44s\n" "🔄 Renew user"
+        printf "  ${C_CHOICE}[ 6]${C_RESET} %-44s\n" "🔒 Lock user"
+        printf "  ${C_CHOICE}[ 7]${C_RESET} %-44s\n" "🔓 Unlock user"
+        printf "  ${C_CHOICE}[ 8]${C_RESET} %-44s\n" "👁️ User details"
+        printf "  ${C_CHOICE}[ 9]${C_RESET} %-44s\n" "⏱️ Trial user"
+        printf "  ${C_CHOICE}[10]${C_RESET} %-44s\n" "👥 Bulk create users"
+        printf "  ${C_CHOICE}[11]${C_RESET} %-44s\n" "🧹 Cleanup my expired users"
+        echo -e "\n  ${C_WARN}[ 0]${C_RESET} ↩️ Exit console (closes SSH session)"
+        echo
+        read -r -p "👉 Select an option: " dc || return
+        case $dc in
+            1) list_users; press_enter ;;
+            2) create_user; press_enter ;;
+            3) edit_user; press_enter ;;
+            4) delete_user; press_enter ;;
+            5) renew_user; press_enter ;;
+            6) lock_user; press_enter ;;
+            7) unlock_user; press_enter ;;
+            8) view_user_details; press_enter ;;
+            9) create_trial_account; press_enter ;;
+            10) bulk_create_users; press_enter ;;
+            11) cleanup_expired; press_enter ;;
+            0) return ;;
+            *) invalid_option ;;
+        esac
+    done
+}
+
+# Lists every managed user grouped by the admin/delegated owner who created it.
+# Only meaningful for the server owner (VSS_ACTOR unset); delegated consoles
+# already see only their own accounts via list_users().
+list_users_by_owner() {
+    clear; show_banner
+    echo -e "${C_BOLD}${C_PURPLE}--- 👥 Users by owner ---${C_RESET}\n"
+    if [[ ! -s "$DB_FILE" ]]; then
+        echo -e "${C_YELLOW}ℹ️ No users are currently being managed.${C_RESET}"
+        press_enter; return
+    fi
+
+    # Collect the distinct owners (defaulting missing rows to "admin").
+    local -A _owners=()
+    local _u _o
+    while IFS=: read -r _u _; do
+        [[ -z "$_u" ]] && continue
+        _o=$(_own_get "$_u")
+        _owners["$_o"]=1
+    done < "$DB_FILE"
+    [[ -z "${_owners[admin]:-}" ]] && _owners["admin"]=1
+
+    local _owner _any_owner _shown
+    for _owner in $(printf '%s\n' "${!_owners[@]}" | LC_ALL=C sort); do
+        _any_owner=false
+        echo -e "${C_BOLD}${C_CYAN}👤 ${_owner}${C_RESET}"
+        while IFS=: read -r _u _ _ _ _ _marker _; do
+            [[ -z "$_u" ]] && continue
+            [[ "$(_own_get "$_u")" == "$_owner" ]] || continue
+            local _tag=""
+            [[ "$_marker" == "trial" ]] && _tag=" ${C_YELLOW}(trial)${C_RESET}"
+            echo -e "   ${C_GREEN}●${C_RESET} ${_u}${_tag}"
+            _any_owner=true
+        done < "$DB_FILE"
+        [[ "$_any_owner" == "false" ]] && echo -e "   ${C_DIM}none${C_RESET}"
+        echo
+    done
+    press_enter
+}
 
 grant_root_menu() {
     local grp; grp=$(_gr_sudo_group)
@@ -10821,44 +11019,138 @@ grant_root_menu() {
     [[ -x "$_login_shell" ]] || _login_shell=$(command -v bash 2>/dev/null)
     local _nologin_shell; _nologin_shell=$(_gr_nologin_shell)
     [[ -n "$_nologin_shell" ]] || _nologin_shell=/usr/sbin/nologin
+    local _delshell=/usr/local/bin/vss-subadmin
 
     while true; do
         clear; show_banner
-        echo -e "${C_BOLD}${C_PURPLE}--- 👑 Grant/Revoke Root Access ---${C_RESET}"
+        echo -e "${C_BOLD}${C_PURPLE}--- 👑 Grant/Revoke Access ---${C_RESET}"
         if [[ -z "$grp" ]]; then
             echo -e "\n${C_RED}❌ Neither a 'sudo' nor 'wheel' group exists on this host.${C_RESET}"
             press_enter; return
         fi
-        echo -e "${C_DIM}Administrative group: ${C_YELLOW}${grp}${C_RESET}"
+        echo -e "${C_DIM}Sudo group: ${C_YELLOW}${grp}${C_RESET}   Delegated console: ${C_YELLOW}${_delshell}${C_RESET}"
 
-        echo -e "\n${C_BOLD}Users with root/sudo access:${C_RESET}"
-        local _any_admin=false _au _ashell
+        echo -e "\n${C_BOLD}FULL ROOT users (bash shell + ${grp}):${C_RESET}"
+        local _any=false _au _ashell
         while IFS=: read -r _au _ _ _uid _; do
-            if [[ "$_uid" == "0" ]]; then
-                echo -e "   ${C_GREEN}●${C_RESET} ${_au} ${C_DIM}(uid 0)${C_RESET}"
-                _any_admin=true
-            fi
+            [[ "$_uid" == "0" ]] && echo -e "   ${C_GREEN}●${C_RESET} ${_au} ${C_DIM}(uid 0)${C_RESET}" && _any=true
         done < /etc/passwd
         while IFS= read -r _au; do
             [[ -z "$_au" || "$_au" == "root" ]] && continue
             _ashell=$(_gr_user_shell "$_au")
             echo -e "   ${C_GREEN}●${C_RESET} ${_au} ${C_DIM}(${grp}, shell: ${_ashell:-?})${C_RESET}"
-            _any_admin=true
+            _any=true
         done < <(getent group "$grp" 2>/dev/null | cut -d: -f4 | tr ',' '\n')
-        [[ "$_any_admin" == "false" ]] && echo -e "   ${C_DIM}none${C_RESET}"
+        [[ "$_any" == "false" ]] && echo -e "   ${C_DIM}none${C_RESET}"
+
+        echo -e "\n${C_BOLD}Delegated user-managers (own accounts only):${C_RESET}"
+        _any=false
+        while IFS=: read -r _au _ _ _ _ _ _ _shell; do
+            [[ "$_shell" == "$_delshell" ]] || continue
+            [[ -n "$_au" ]] && echo -e "   ${C_YELLOW}●${C_RESET} ${_au} ${C_DIM}(delegated console)${C_RESET}" && _any=true
+        done < /etc/passwd
+        [[ "$_any" == "false" ]] && echo -e "   ${C_DIM}none${C_RESET}"
 
         echo -e "\n${C_BOLD}Options:${C_RESET}\n"
-        printf "  ${C_CHOICE}[ 1]${C_RESET} %-46s\n" "➕ Grant sudo + SSH shell to a user"
-        printf "  ${C_CHOICE}[ 2]${C_RESET} %-46s\n" "➖ Revoke sudo + SSH shell from a user"
-        printf "  ${C_CHOICE}[ 3]${C_RESET} %-46s\n" "📋 List all sudo users"
-        printf "  ${C_CHOICE}[ 4]${C_RESET} %-46s\n" "🔓 Toggle passwordless (NOPASSWD) sudo"
+        printf "  ${C_CHOICE}[ 1]${C_RESET} %-46s\n" "👤 Delegate user management (own accounts only)"
+        printf "  ${C_CHOICE}[ 2]${C_RESET} %-46s\n" "❌ Remove delegation from a user"
+        printf "  ${C_CHOICE}[ 3]${C_RESET} %-46s\n" "➕ Grant FULL root (shell + sudo)"
+        printf "  ${C_CHOICE}[ 4]${C_RESET} %-46s\n" "➖ Revoke FULL root"
+        printf "  ${C_CHOICE}[ 5]${C_RESET} %-46s\n" "📋 List admins & delegated users"
+        printf "  ${C_CHOICE}[ 6]${C_RESET} %-46s\n" "👥 List users by owner"
+        printf "  ${C_CHOICE}[ 7]${C_RESET} %-46s\n" "🔓 Toggle NOPASSWD sudo (full root)"
         echo -e "\n  ${C_WARN}[ 0]${C_RESET} ↩️ Return"
         echo
         read -r -p "👉 Select an option: " gr_choice || return
         case $gr_choice in
             1)
+                local du _ok
+                read -r -p "👉 Username to delegate: " du
+                du=$(printf '%s' "$du" | tr -d '[:space:]')
+                if [[ -z "$du" ]]; then
+                    echo -e "\n${C_YELLOW}⚠️ No username entered.${C_RESET}"
+                elif ! id "$du" &>/dev/null; then
+                    echo -e "\n${C_RED}❌ User '$du' does not exist on this server.${C_RESET}"
+                elif [[ "$du" == "root" ]]; then
+                    echo -e "\n${C_YELLOW}ℹ️ 'root' cannot be delegated.${C_RESET}"
+                elif ! _gr_deleg_wrapper_installed; then
+                    echo -e "\n${C_RED}❌ Could not install the delegated console.${C_RESET}"
+                else
+                    echo -e "\n${C_DIM}This strips '${du}' of full root (sudo group + shell) and gives them${C_RESET}"
+                    echo -e "${C_DIM}a restricted console where they can only manage accounts they create.${C_RESET}"
+                    read -r -p "👉 Proceed? (y/N): " _ok
+                    if [[ "${_ok,,}" != "y" ]]; then
+                        echo -e "\n${C_YELLOW}❌ Cancelled.${C_RESET}"
+                    else
+                        local _fail=false
+                        if _gr_in_group "$du" "$grp"; then
+                            if gpasswd -d "$du" "$grp" >/dev/null 2>&1; then
+                                echo -e " ${C_GREEN}✅${C_RESET} Removed '${du}' from '${grp}'."
+                            else
+                                echo -e " ${C_RED}❌ Could not remove '${du}' from '${grp}'.${C_RESET}"; _fail=true
+                            fi
+                        fi
+                        local _np; _np=$(_gr_nopasswd_file "$du")
+                        if [[ -f "$_np" ]]; then
+                            rm -f "$_np" 2>/dev/null && echo -e " ${C_GREEN}✅${C_RESET} Removed full-root NOPASSWD rule."
+                        fi
+                        if _gr_install_deleg_wrapper && \
+                           printf '%s ALL=(root) NOPASSWD: /usr/local/bin/vss-subadmin\n' "$du" > "$(_gr_deleg_dropin "$du")" && \
+                           { command -v visudo >/dev/null 2>&1 && visudo -cf "$(_gr_deleg_dropin "$du")" >/dev/null 2>&1 || true; } && \
+                           chmod 0440 "$(_gr_deleg_dropin "$du")" && \
+                           usermod -s "$_delshell" "$du" 2>/dev/null && \
+                           [[ "$(_gr_user_shell "$du")" == "$_delshell" ]]; then
+                            echo -e "\n${C_GREEN}✅ '${du}' is now a delegated user-manager.${C_RESET}"
+                            echo -e "${C_DIM}   They log in with: ssh ${du}@<server-ip>  (their assigned password)${C_RESET}"
+                            echo -e "${C_DIM}   The console opens automatically; they can only manage accounts they create.${C_RESET}"
+                            if _ff_is_shadow_locked "$du"; then
+                                echo -e "${C_YELLOW}⚠️ This account is LOCKED — unlock it first or they cannot log in.${C_RESET}"
+                            fi
+                            local _expd _today
+                            _expd=$(awk -F: -v u="$du" '$1==u{print $8; exit}' /etc/shadow 2>/dev/null)
+                            _today=$(( $(date +%s) / 86400 ))
+                            if [[ "$_expd" =~ ^[0-9]+$ ]] && (( _expd < _today )); then
+                                echo -e "${C_YELLOW}⚠️ This account EXPIRED — renew it before they can log in.${C_RESET}"
+                            fi
+                        else
+                            echo -e "\n${C_RED}❌ Delegation setup incomplete — check errors above.${C_RESET}"
+                            echo -e "${C_DIM}   Try revoking delegation and granting again.${C_RESET}"
+                        fi
+                    fi
+                fi
+                ;;
+            2)
+                local dv _ok
+                read -r -p "👉 Username to undelegate: " dv
+                dv=$(printf '%s' "$dv" | tr -d '[:space:]')
+                if [[ -z "$dv" ]]; then
+                    echo -e "\n${C_YELLOW}⚠️ No username entered.${C_RESET}"
+                elif ! id "$dv" &>/dev/null; then
+                    echo -e "\n${C_RED}❌ User '$dv' does not exist on this server.${C_RESET}"
+                elif [[ "$dv" == "root" ]]; then
+                    echo -e "\n${C_YELLOW}ℹ️ 'root' is not delegated.${C_RESET}"
+                elif [[ "$(_gr_user_shell "$dv")" != "$_delshell" ]] && ! _gr_deleg_has_dropin "$dv"; then
+                    echo -e "\n${C_YELLOW}ℹ️ '${dv}' is not a delegated user-manager.${C_RESET}"
+                else
+                    echo -e "\n${C_DIM}This removes '${dv}'s delegated console and restores nologin shell.${C_RESET}"
+                    read -r -p "👉 Proceed? (y/N): " _ok
+                    if [[ "${_ok,,}" != "y" ]]; then
+                        echo -e "\n${C_YELLOW}❌ Cancelled.${C_RESET}"
+                    else
+                        local _dp; _dp=$(_gr_deleg_dropin "$dv")
+                        [[ -f "$_dp" ]] && rm -f "$_dp" 2>/dev/null && echo -e " ${C_GREEN}✅${C_RESET} Removed delegated sudo rule."
+                        if usermod -s "$_nologin_shell" "$dv" 2>/dev/null && [[ "$(_gr_user_shell "$dv")" == "$_nologin_shell" ]]; then
+                            echo -e " ${C_GREEN}✅${C_RESET} Login shell reset to ${_nologin_shell} — no SSH shell."
+                        else
+                            echo -e " ${C_RED}❌ Could not reset the login shell.${C_RESET}"
+                        fi
+                        echo -e "\n${C_GREEN}✅ '${dv}' is no longer a delegated user-manager.${C_RESET}"
+                    fi
+                fi
+                ;;
+            3)
                 local gr_user _cur_shell _ok _fail
-                read -r -p "👉 Username to grant sudo: " gr_user
+                read -r -p "👉 Username to grant FULL root: " gr_user
                 gr_user=$(printf '%s' "$gr_user" | tr -d '[:space:]')
                 if [[ -z "$gr_user" ]]; then
                     echo -e "\n${C_YELLOW}⚠️ No username entered.${C_RESET}"
@@ -10870,8 +11162,8 @@ grant_root_menu() {
                     echo -e "\n${C_RED}❌ bash is not installed — cannot enable an SSH shell.${C_RESET}"
                 else
                     _cur_shell=$(_gr_user_shell "$gr_user")
-                    echo -e "\n${C_DIM}This will add '${gr_user}' to '${grp}' and set the login shell to ${_login_shell}.${C_RESET}"
-                    echo -e "${C_DIM}They can then log in over SSH with their password and run: sudo -i${C_RESET}"
+                    echo -e "\n${C_DIM}This adds '${gr_user}' to '${grp}' AND sets the login shell to ${_login_shell}.${C_RESET}"
+                    echo -e "${C_DIM}They can log in over SSH and run: sudo -i (full root).${C_RESET}"
                     read -r -p "👉 Proceed? (y/N): " _ok
                     if [[ "${_ok,,}" != "y" ]]; then
                         echo -e "\n${C_YELLOW}❌ Cancelled.${C_RESET}"
@@ -10888,24 +11180,24 @@ grant_root_menu() {
                             echo -e " ${C_RED}❌ Could not change the login shell.${C_RESET}"; _fail=true
                         fi
                         if [[ "$_fail" == "false" ]]; then
-                            echo -e "\n${C_GREEN}✅ '${gr_user}' now has full root access via SSH + sudo.${C_RESET}"
+                            echo -e "\n${C_GREEN}✅ '${gr_user}' now has FULL root access via SSH + sudo.${C_RESET}"
                             echo -e "${C_DIM}   Test: ssh ${gr_user}@<server-ip>  →  sudo -i${C_RESET}"
                             if _ff_is_shadow_locked "$gr_user"; then
-                                echo -e "${C_YELLOW}⚠️ This account is currently LOCKED — unlock it (Users → Unlock) or they cannot log in.${C_RESET}"
+                                echo -e "${C_YELLOW}⚠️ This account is currently LOCKED — unlock it first.${C_RESET}"
                             fi
                             local _expd _today
                             _expd=$(awk -F: -v u="$gr_user" '$1==u{print $8; exit}' /etc/shadow 2>/dev/null)
                             _today=$(( $(date +%s) / 86400 ))
                             if [[ "$_expd" =~ ^[0-9]+$ ]] && (( _expd < _today )); then
-                                echo -e "${C_YELLOW}⚠️ This account EXPIRED on $(date -d "@$((_expd * 86400))" '+%Y-%m-%d' 2>/dev/null || echo "$_expd") — renew it before they can log in.${C_RESET}"
+                                echo -e "${C_YELLOW}⚠️ This account EXPIRED — renew it before they can log in.${C_RESET}"
                             fi
                         fi
                     fi
                 fi
                 ;;
-            2)
+            4)
                 local rv_user _rshell _rok _rfail
-                read -r -p "👉 Username to revoke sudo: " rv_user
+                read -r -p "👉 Username to revoke FULL root: " rv_user
                 rv_user=$(printf '%s' "$rv_user" | tr -d '[:space:]')
                 if [[ -z "$rv_user" ]]; then
                     echo -e "\n${C_YELLOW}⚠️ No username entered.${C_RESET}"
@@ -10915,8 +11207,8 @@ grant_root_menu() {
                     echo -e "\n${C_RED}❌ Refusing to modify 'root'.${C_RESET}"
                 else
                     _rshell=$(_gr_user_shell "$rv_user")
-                    echo -e "\n${C_DIM}This will remove '${rv_user}' from '${grp}', delete its NOPASSWD rule,${C_RESET}"
-                    echo -e "${C_DIM}and set the login shell back to ${_nologin_shell} (SSH shell closed).${C_RESET}"
+                    echo -e "\n${C_DIM}This removes '${rv_user}' from '${grp}', deletes its NOPASSWD rule,${C_RESET}"
+                    echo -e "${C_DIM}and sets the login shell back to ${_nologin_shell}.${C_RESET}"
                     read -r -p "👉 Proceed? (y/N): " _rok
                     if [[ "${_rok,,}" != "y" ]]; then
                         echo -e "\n${C_YELLOW}❌ Cancelled.${C_RESET}"
@@ -10945,33 +11237,46 @@ grant_root_menu() {
                             echo -e " ${C_RED}❌ Could not reset the login shell.${C_RESET}"; _rfail=true
                         fi
                         if [[ "$_rfail" == "false" ]]; then
-                            echo -e "\n${C_GREEN}✅ '${rv_user}' can no longer log in to a shell (sudo access removed).${C_RESET}"
+                            echo -e "\n${C_GREEN}✅ '${rv_user}' can no longer log in to a shell.${C_RESET}"
                         fi
                     fi
                 fi
                 ;;
-            3)
-                echo -e "\n${C_CYAN}Users with root/sudo access:${C_RESET}"
-                local _lu _lsh
+            5)
+                echo -e "\n${C_CYAN}FULL ROOT users (bash + ${grp}):${C_RESET}"
+                local _lu _lsh _ls_any=false
                 while IFS=: read -r _lu _ _ _luid _; do
-                    [[ "$_luid" == "0" ]] && echo -e "   ${C_GREEN}●${C_RESET} ${_lu} ${C_DIM}(uid 0)${C_RESET}"
+                    [[ "$_luid" == "0" ]] && echo -e "   ${C_GREEN}●${C_RESET} ${_lu} ${C_DIM}(uid 0)${C_RESET}" && _ls_any=true
                 done < /etc/passwd
                 while IFS= read -r _lu; do
                     [[ -z "$_lu" ]] && continue
                     _lsh=$(_gr_user_shell "$_lu")
                     echo -e "   ${C_GREEN}●${C_RESET} ${_lu} ${C_DIM}(${grp}, shell: ${_lsh:-?})${C_RESET}"
+                    _ls_any=true
                 done < <(getent group "$grp" 2>/dev/null | cut -d: -f4 | tr ',' '\n')
+                [[ "$_ls_any" == "false" ]] && echo -e "   ${C_DIM}none${C_RESET}"
+                echo -e "\n${C_YELLOW}Delegated user-managers:${C_RESET}"
+                _ls_any=false
+                while IFS=: read -r _lu _ _ _ _ _ _ _shell; do
+                    [[ "$_shell" == "$_delshell" ]] || continue
+                    echo -e "   ${C_YELLOW}●${C_RESET} ${_lu} ${C_DIM}(restricted console, own accounts only)${C_RESET}"
+                    _ls_any=true
+                done < /etc/passwd
+                [[ "$_ls_any" == "false" ]] && echo -e "   ${C_DIM}none${C_RESET}"
                 ;;
-            4)
+            6)
+                list_users_by_owner
+                ;;
+            7)
                 local pw_user _pnp
-                read -r -p "👉 Username for passwordless sudo: " pw_user
+                read -r -p "👉 Username for passwordless FULL sudo: " pw_user
                 pw_user=$(printf '%s' "$pw_user" | tr -d '[:space:]')
                 if [[ -z "$pw_user" ]]; then
                     echo -e "\n${C_YELLOW}⚠️ No username entered.${C_RESET}"
                 elif ! id "$pw_user" &>/dev/null; then
                     echo -e "\n${C_RED}❌ User '$pw_user' does not exist on this server.${C_RESET}"
                 elif ! _gr_in_group "$pw_user" "$grp"; then
-                    echo -e "\n${C_YELLOW}⚠️ '${pw_user}' is not in '${grp}' — grant sudo access first ([1]).${C_RESET}"
+                    echo -e "\n${C_YELLOW}⚠️ '${pw_user}' is not in '${grp}' — grant FULL root first ([3]).${C_RESET}"
                 else
                     _pnp=$(_gr_nopasswd_file "$pw_user")
                     if [[ -f "$_pnp" ]]; then
@@ -10986,7 +11291,7 @@ grant_root_menu() {
                                 mkdir -p /etc/sudoers.d
                                 if install -m 0440 -o root -g root "$_ptmp" "$_pnp" 2>/dev/null \
                                    || { cp -f "$_ptmp" "$_pnp" && chmod 0440 "$_pnp"; }; then
-                                    echo -e "\n${C_GREEN}✅ NOPASSWD sudo ENABLED for '${pw_user}' (${_pnp}).${C_RESET}"
+                                    echo -e "\n${C_GREEN}✅ NOPASSWD FULL sudo ENABLED for '${pw_user}' (${_pnp}).${C_RESET}"
                                     echo -e "${C_DIM}   They can now run: sudo -i   (no password prompt)${C_RESET}"
                                     if ! grep -Eq '^[[:space:]]*[#@]includedir[[:space:]]+/etc/sudoers\.d' /etc/sudoers 2>/dev/null; then
                                         echo -e "${C_YELLOW}⚠️ /etc/sudoers does not include /etc/sudoers.d — add: #includedir /etc/sudoers.d${C_RESET}"
@@ -11479,6 +11784,19 @@ EOF
 
 if [[ "$1" == "--install-setup" ]]; then
     initial_setup
+    exit 0
+fi
+
+# Delegated console entry point (used by /usr/local/bin/vss-subadmin).
+# Runs as root, restricted to the calling sudo user's own accounts.
+if [[ "$1" == "--delegate" ]]; then
+    [[ $EUID -eq 0 ]] || exit 1
+    actor="${2:-}"
+    [[ -n "$actor" && "$actor" != "root" ]] || exit 1
+    id "$actor" &>/dev/null || exit 1
+    VSS_ACTOR="$actor"; export VSS_ACTOR
+    ensure_VPS_superScript_dirs
+    delegate_menu
     exit 0
 fi
 
