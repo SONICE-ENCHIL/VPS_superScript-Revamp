@@ -10947,8 +10947,7 @@ delegate_menu() {
     while true; do
         clear; show_banner
         echo -e "${C_BOLD}${C_PURPLE}--- 👤 Delegated User Manager — ${C_YELLOW}${actor}${C_PURPLE} ---${C_RESET}"
-        echo -e "${C_DIM}You may only manage accounts YOU created.${C_RESET}"
-        echo -e "${C_DIM}Accounts created by the server owner are hidden from you.${C_RESET}\n"
+        echo -e "${C_DIM}This console manages accounts you create.${C_RESET}\n"
         printf "  ${C_CHOICE}[ 1]${C_RESET} %-44s\n" "📋 List my users"
         printf "  ${C_CHOICE}[ 2]${C_RESET} %-44s\n" "✨ Create user"
         printf "  ${C_CHOICE}[ 3]${C_RESET} %-44s\n" "✏️ Edit user"
