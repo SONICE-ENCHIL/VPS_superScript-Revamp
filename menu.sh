@@ -9046,8 +9046,8 @@ system_hub() {
         read -r -p "$(echo -e ${C_PROMPT}"👉 Select an option: "${C_RESET})" choice || return
         case $choice in
             1) auto_reboot_menu ;;
-            2) timezone_menu; press_enter ;;
-            3) update_script; press_enter ;;
+            2) timezone_menu ;;
+            3) update_script ;;
             0) return ;;
             *) invalid_option ;;
         esac
