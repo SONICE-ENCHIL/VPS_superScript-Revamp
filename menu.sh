@@ -10918,9 +10918,14 @@ _gr_deleg_wrapper_installed() { [[ -x /usr/local/bin/vss-subadmin ]]; }
 # deriving the actor from SUDO_USER so it cannot be spoofed.
 _gr_install_deleg_wrapper() {
     _gr_deleg_wrapper_installed && return 0
-    local self
-    self=$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || true)
+    local self _cand
+    for _cand in "${BASH_SOURCE[0]}" "$0" "/usr/local/bin/menu"; do
+        self=$(readlink -f "$_cand" 2>/dev/null || true)
+        [[ -n "$self" && -f "$self" ]] && break
+        self=""
+    done
     [[ -n "$self" && -f "$self" ]] || return 1
+    mkdir -p /usr/local/bin 2>/dev/null || return 1
     cat > /usr/local/bin/vss-subadmin <<EOF
 #!/bin/bash
 # VPS_superScript delegated user console. Ignores all arguments (ssh -c / sftp).
@@ -11072,7 +11077,7 @@ grant_root_menu() {
                     echo -e "\n${C_RED}❌ User '$du' does not exist on this server.${C_RESET}"
                 elif [[ "$du" == "root" ]]; then
                     echo -e "\n${C_YELLOW}ℹ️ 'root' cannot be delegated.${C_RESET}"
-                elif ! _gr_deleg_wrapper_installed; then
+                elif ! _gr_install_deleg_wrapper; then
                     echo -e "\n${C_RED}❌ Could not install the delegated console.${C_RESET}"
                 else
                     echo -e "\n${C_DIM}This strips '${du}' of full root (sudo group + shell) and gives them${C_RESET}"
