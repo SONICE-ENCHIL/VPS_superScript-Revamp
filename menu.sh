@@ -7018,6 +7018,8 @@ refresh_banner_cache() {
         _today_ts=$(date +%s)
         while IFS=: read -r _u _p _exp _rest; do
             [[ -n "$_u" && "$_u" != \#* ]] || continue
+            # Only count users owned by the current delegated actor
+            [[ -n "${VSS_ACTOR:-}" ]] && (_own_get "$_u" != "$VSS_ACTOR") && continue
             (( BANNER_CACHE_TOTAL_USERS++ ))
             _exp_ts=$(date -d "$_exp" +%s 2>/dev/null || echo 0)
             [[ "$_exp_ts" =~ ^[0-9]+$ ]] && (( _exp_ts > 0 && _exp_ts <= _today_ts )) \
@@ -10956,9 +10958,7 @@ delegate_menu() {
         printf "  ${C_CHOICE}[ 7]${C_RESET} %-44s\n" "🔓 Unlock user"
         printf "  ${C_CHOICE}[ 8]${C_RESET} %-44s\n" "👁️ User details"
         printf "  ${C_CHOICE}[ 9]${C_RESET} %-44s\n" "⏱️ Trial user"
-        printf "  ${C_CHOICE}[10]${C_RESET} %-44s\n" "👥 Bulk create users"
-        printf "  ${C_CHOICE}[11]${C_RESET} %-44s\n" "🧹 Cleanup my expired users"
-        echo -e "\n  ${C_WARN}[ 0]${C_RESET} ↩️ Exit console (closes SSH session)"
+        printf "  ${C_WARN}[ 0]${C_RESET} ↩️ Exit console (closes SSH session)"
         echo
         read -r -p "👉 Select an option: " dc || return
         case $dc in
@@ -10971,8 +10971,7 @@ delegate_menu() {
             7) unlock_user; press_enter ;;
             8) view_user_details; press_enter ;;
             9) create_trial_account; press_enter ;;
-            10) bulk_create_users; press_enter ;;
-            11) cleanup_expired; press_enter ;;
+            10) cleanup_expired; press_enter ;;
             0) return ;;
             *) invalid_option ;;
         esac
