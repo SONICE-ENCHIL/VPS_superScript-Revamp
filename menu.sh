@@ -7123,52 +7123,22 @@ show_banner() {
     for ((i=0; i<status_pad; i++)); do status_padding+=" "; done
     
     echo -e "  $DOT ${C_YELLOW}STATUS:${C_RESET} ${status_padding}${status_content}"
+    echo -e ""
 
-    # Port roster with live status dots: green=up, red=down. Only services that
-    # are actually present (active or installed) are listed.
-    _port_present() {
-        systemctl is-active --quiet "$1" 2>/dev/null && return 0
-        systemctl list-unit-files "$1" 2>/dev/null | grep -q "^[[:space:]]*$1" && return 2
-        return 1
-    }
-    local -a p_ent=()
-    _add_port() {  # label unit value
-        _port_present "$2"; local st=$?
-        (( st == 1 )) && return 0
-        local dot="${C_GREEN}🟢${C_RESET}" disp="$3"
-        (( st == 2 )) && { dot="${C_RED}🔴${C_RESET}"; disp="down"; }
-        p_ent+=("${dot} ${C_ORANGE}$1 ${disp}${C_RESET}")
-    }
-    _add_port "SSH"         "ssh"                "22"
-    _add_port "ZiVPN"       "zivpn.service"      "${ZIVPN_LISTEN_PORT:-5667}"
-    _add_port "UDP-Custom"  "udp-custom"         "${UDP_CUSTOM_LISTEN_PORT:-36712}"
-    _add_port "BadVPN"      "badvpn"             "${BADVPN_LISTEN_PORT:-7300}"
-    _add_port "FalconProxy" "falconproxy"        "$(grep -oP '^PORTS="\K[^"]*' "$FALCONPROXY_CONFIG_FILE" 2>/dev/null | cut -d',' -f1 | grep . || echo "${FALCONPROXY_PORT:-8080}")"
-    _add_port "DNSTT"       "dnstt.service"      "53"
-    _add_port "Dropbear"    "dropbear"           "${DROPBEAR_PORTS:-109,143}"
-    _add_port "Nginx"       "nginx"              "${NGINX_INTERNAL_HTTP_PORT:-8880}/${NGINX_INTERNAL_TLS_PORT:-8443}"
-    _add_port "OpenVPN"     "openvpn@server-tcp" "${OPENVPN_TCP_PORT:-1194}"
-    _add_port "WireGuard"   "wg-quick@wg0"       "${WIREGUARD_PORT:-51820}"
-    _add_port "Hysteria"    "hysteria-server"    "${HYSTERIA2_PORT:-20001}"
-    _add_port "ShadowSocks" "shadowsocks-libev"  "${SHADOWSOCKS_PORT:-2443}"
-    _add_port "Socks5"      "danted"             "${SOCKS5_PORT:-1080}"
-    _add_port "Stunnel"     "stunnel4"           "${STUNNEL_PORT:-777}"
-    _add_port "WS-SSH"      "ws-ssh"             "${WS_SSH_INTERNAL_PORT:-2080}"
-    
     local pi a b; local total=${#p_ent[@]}
     if (( total > 0 )); then
-        echo -e "  $DOT ${C_YELLOW}PORTS:${C_RESET}"
         for ((pi=0; pi<total; pi+=2)); do
             a="${p_ent[pi]}"
             b=""
             (( pi+1 < total )) && b="${p_ent[pi+1]}"
             if [[ -n "$b" ]]; then
-                printf '\033[13G%s\033[41G%s\033[K\n' "$a" "$b"
+                printf '%s %s\n' "$a" "$b"
             else
-                printf '\033[13G%s\033[K\n' "$a"
+                printf '%s\n' "$a"
             fi
         done
     fi
+
     echo -e "$BAR"
 }
 
