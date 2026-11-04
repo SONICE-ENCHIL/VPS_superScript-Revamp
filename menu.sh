@@ -7111,7 +7111,18 @@ show_banner() {
     echo -e "  $DOT ${C_YELLOW}UPTIME:${C_RESET}   ${C_GREEN}${uptime_str}${C_RESET}"
     echo -e "  $DOT ${C_YELLOW}USERS:${C_RESET}   ${C_GREEN}${BANNER_CACHE_TOTAL_USERS} managed · ${BANNER_CACHE_ONLINE_USERS} online · ${BANNER_CACHE_EXPIRED_USERS} expired${C_RESET}"
     echo -e "  $DOT ${C_YELLOW}LOCKS:${C_RESET}   ${C_YELLOW}HWID ${_hwid} · UDP-LOCK ${_ushare}${C_RESET}"
-    echo -e "  $DOT ${C_YELLOW}STATUS:${C_RESET}  ${C_WHITE}load ${_cpu_col}${load}${C_RESET} · ${c}${bar}${RESET} ${pct}%"
+    
+    # STATUS line with RAM bar - fixed width to keep ports aligned
+    # Column width after "STATUS:" label is 34 characters
+    local status_width=34
+    local status_content="load ${_cpu_col}${load}${C_RESET} · ${c}${bar}${RESET} ${pct}%"
+    local status_len=${#status_content}
+    local status_pad=$(( status_width - status_len ))
+    status_pad=$(( status_pad < 0 ? 0 : status_pad ))
+    local status_padding=""
+    for ((i=0; i<status_pad; i++)); do status_padding+=" "; done
+    
+    echo -e "  $DOT ${C_YELLOW}STATUS:${C_RESET} ${status_padding}${status_content}"
 
     # Port roster with live status dots: green=up, red=down. Only services that
     # are actually present (active or installed) are listed.
