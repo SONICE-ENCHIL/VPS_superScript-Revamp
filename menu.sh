@@ -7125,6 +7125,22 @@ show_banner() {
     echo -e "  $DOT ${C_YELLOW}STATUS:${C_RESET} ${status_padding}${status_content}"
     echo -e ""
 
+    _add_port "SSH"         "ssh"                "22"
+    _add_port "ZiVPN"       "zivpn.service"      "${ZIVPN_LISTEN_PORT:-5667}"
+    _add_port "UDP-Custom"  "udp-custom"         "${UDP_CUSTOM_LISTEN_PORT:-36712}"
+    _add_port "BadVPN"      "badvpn"             "${BADVPN_LISTEN_PORT:-7300}"
+    _add_port "FalconProxy" "falconproxy"        "$(grep -oP '^PORTS="\K[^"]*' "$FALCONPROXY_CONFIG_FILE" 2>/dev/null | cut -d',' -f1 | grep . || echo "${FALCONPROXY_PORT:-8080}")"
+    _add_port "DNSTT"       "dnstt.service"      "53"
+    _add_port "Dropbear"    "dropbear"           "${DROPBEAR_PORTS:-109,143}"
+    _add_port "Nginx"       "nginx"              "${NGINX_INTERNAL_HTTP_PORT:-8880}/${NGINX_INTERNAL_TLS_PORT:-8443}"
+    _add_port "OpenVPN"     "openvpn@server-tcp" "${OPENVPN_TCP_PORT:-1194}"
+    _add_port "WireGuard"   "wg-quick@wg0"       "${WIREGUARD_PORT:-51820}"
+    _add_port "Hysteria"    "hysteria-server"    "${HYSTERIA2_PORT:-20001}"
+    _add_port "ShadowSocks" "shadowsocks-libev"  "${SHADOWSOCKS_PORT:-2443}"
+    _add_port "Socks5"      "danted"             "${SOCKS5_PORT:-1080}"
+    _add_port "Stunnel"     "stunnel4"           "${STUNNEL_PORT:-777}"
+    _add_port "WS-SSH"      "ws-ssh"             "${WS_SSH_INTERNAL_PORT:-2080}"
+
     local pi a b; local total=${#p_ent[@]}
     if (( total > 0 )); then
         for ((pi=0; pi<total; pi+=2)); do
