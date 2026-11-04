@@ -7115,7 +7115,7 @@ show_banner() {
     # STATUS line with RAM bar - fixed width to keep ports aligned
     # Column width after "STATUS:" label is 34 characters
     local status_width=34
-    local status_content="load ${_cpu_col}${load}${C_RESET} · ${c}${bar}${RESET} ${pct}%"
+    local status_content="load ${_cpu_col}${load}${C_RESET} · RAM ${c}${bar}${RESET} ${pct}%"
     local status_len=${#status_content}
     local status_pad=$(( status_width - status_len ))
     status_pad=$(( status_pad < 0 ? 0 : status_pad ))
@@ -7124,6 +7124,22 @@ show_banner() {
     
     echo -e "  $DOT ${C_YELLOW}STATUS:${C_RESET} ${status_padding}${status_content}"
     echo -e ""
+
+    # Port roster with live status dots: green=up, red=down. Only services that
+    # are actually present (active or installed) are listed.
+    _port_present() {
+        systemctl is-active --quiet "$1" 2>/dev/null && return 0
+        systemctl list-unit-files "$1" 2>/dev/null | grep -q "^[[:space:]]*$1" && return 2
+        return 1
+    }
+    local -a p_ent=()
+    _add_port() {  # label unit value
+        _port_present "$2"; local st=$?
+        (( st == 1 )) && return 0
+        local dot="${C_GREEN}🟢${C_RESET}" disp="$3"
+        (( st == 2 )) && { dot="${C_RED}🔴${C_RESET}"; disp="down"; }
+        p_ent+=("${dot} ${C_ORANGE}$1 ${disp}${C_RESET}")
+    }
 
     _add_port "SSH"         "ssh"                "22"
     _add_port "ZiVPN"       "zivpn.service"      "${ZIVPN_LISTEN_PORT:-5667}"
