@@ -7132,7 +7132,7 @@ show_banner() {
             b=""
             (( pi+1 < total )) && b="${p_ent[pi+1]}"
             if [[ -n "$b" ]]; then
-                printf '%s %s\n' "$a" "$b"
+                printf '%s  %*s %s\n' "$a" 30 "$b"
             else
                 printf '%s\n' "$a"
             fi
