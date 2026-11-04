@@ -7068,20 +7068,50 @@ show_banner() {
     echo -e "$BAR"
     echo -e "  $DOT ${C_YELLOW}IP:${C_RESET}      ${C_GRAY}${BANNER_CACHE_IP}${C_RESET}"
     echo -e "  $DOT ${C_YELLOW}S.O:${C_RESET} ${C_WHITE}${BANNER_CACHE_OS_NAME}${C_RESET}   $DOT ${C_YELLOW}Base:${C_RESET} ${C_WHITE}${BANNER_CACHE_BASE}${C_RESET}   $DOT ${C_YELLOW}CPU's:${C_RESET} ${C_WHITE}${BANNER_CACHE_CPU_COUNT}${C_RESET}"
-    # Human uptime as weeks/days/hours (e.g. 24w5d6h) from the kernel uptime.
-    local _up_secs _uw _ud _uh _up_disp=""
-    _up_secs=$(cut -d. -f1 /proc/uptime 2>/dev/null || echo 0)
-    [[ "$_up_secs" =~ ^[0-9]+$ ]] || _up_secs=0
-    _uw=$(( _up_secs / 604800 )); _ud=$(( (_up_secs % 604800) / 86400 )); _uh=$(( (_up_secs % 86400) / 3600 ))
-    (( _uw > 0 )) && _up_disp="${_uw}w"
-    (( _ud > 0 )) && _up_disp="${_up_disp}${_ud}d"
-    (( _uh > 0 )) && _up_disp="${_up_disp}${_uh}h"
-    [[ -z "$_up_disp" ]] && _up_disp="<1h"
-    echo -e "  $DOT ${C_YELLOW}UPTIME:${C_RESET}   ${C_GREEN}${_up_disp}${C_RESET}"
+    # ---------- UPTIME: "2 weeks · 1 day · 1 hour" ----------
+    secs=$(cut -d. -f1 /proc/uptime)
+    w=$((secs / 604800))
+    d=$((secs % 604800 / 86400))
+    h=$((secs % 86400 / 3600))
+    m=$((secs % 3600 / 60))
+
+    plural() { [ "$1" -eq 1 ] && echo "$1 $2" || echo "$1 ${2}s"; }
+
+    parts=()
+    [ "$w" -gt 0 ] && parts+=("$(plural $w week)")
+    [ "$d" -gt 0 ] && parts+=("$(plural $d day)")
+    [ "$h" -gt 0 ] && parts+=("$(plural $h hour)")
+    [ "${#parts[@]}" -eq 0 ] && parts+=("$(plural $m minute)")
+
+    uptime_str=""
+    for p in "${parts[@]}"; do
+      uptime_str+="${uptime_str:+ · }$p"
+    done
+
+    # ---------- LOAD + RAM BAR ----------
+    load=$(awk '{print $1}' /proc/loadavg)
+    read -r ram_total ram_used <<< "$(free -m | awk '/Mem:/ {print $2, $3}')"
+
+    pct=$(awk -v u="$ram_used" -v t="$ram_total" 'BEGIN {printf "%.1f", u*100/t}')
+    filled=$(( ram_used * 10 / ram_total ))
+    empty=$(( 10 - filled ))
+
+    bar=""
+    for ((i=0; i<filled; i++)); do bar+="▰"; done
+    for ((i=0; i<empty;  i++)); do bar+="▱"; done
+
+    # Color: green < 70%, yellow 70-89%, red 90%+
+    pct_int=${pct%.*}
+    if   [ "$pct_int" -ge 90 ]; then c='\e[31m'
+    elif [ "$pct_int" -ge 70 ]; then c='\e[33m'
+    else                             c='\e[32m'
+    fi
+    RESET='\e[0m'
+
+    echo -e "  $DOT ${C_YELLOW}UPTIME:${C_RESET}   ${C_GREEN}${uptime_str}${C_RESET}"
     echo -e "  $DOT ${C_YELLOW}USERS:${C_RESET}   ${C_GREEN}${BANNER_CACHE_TOTAL_USERS} managed · ${BANNER_CACHE_ONLINE_USERS} online · ${BANNER_CACHE_EXPIRED_USERS} expired${C_RESET}"
     echo -e "  $DOT ${C_YELLOW}LOCKS:${C_RESET}   ${C_YELLOW}HWID ${_hwid} · UDP-LOCK ${_ushare}${C_RESET}"
-    local _ram_col="$C_GREEN"; awk -v u="${BANNER_CACHE_RAM_USAGE:-0}" 'BEGIN{exit !(u>80)}' && _ram_col="$C_RED"
-    echo -e "  $DOT ${C_YELLOW}STATUS:${C_RESET}  ${C_WHITE}load ${_cpu_col}${BANNER_CACHE_CPU_LOAD}${C_RESET} · ${C_GREEN}RAM ${BANNER_CACHE_MEM_USED}/${BANNER_CACHE_MEM_TOTAL}${C_RESET} (${_ram_col}${BANNER_CACHE_RAM_USAGE}%${C_RESET})${C_RESET}"
+    echo -e "  $DOT ${C_YELLOW}STATUS:${C_RESET}  ${C_WHITE}load ${_cpu_col}${load}${C_RESET} · ${c}${bar}${RESET} ${pct}%"
 
     # Port roster with live status dots: green=up, red=down. Only services that
     # are actually present (active or installed) are listed.
