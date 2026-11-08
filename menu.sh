@@ -9080,6 +9080,26 @@ network_hub() {
     done
 }
 
+uninstall_hub() {
+    while true; do
+        show_banner
+        _hub_header "⚠️  UNINSTALL SCRIPT"
+        echo -e "     ${C_DANGER}⚠️  DANGER: this permanently removes VPS_superScript${C_RESET}"
+        echo -e "     ${C_DANGER}    and ALL data — users, configs, certificates and${C_RESET}"
+        echo -e "     ${C_DANGER}    backups.${C_RESET}"
+        echo
+        echo -e "     ${C_CHOICE}[ 1]${C_RESET} ${C_DANGER}🔥 Yes, uninstall everything${C_RESET}"
+        echo -e "     ${C_CHOICE}[ 0]${C_RESET} ${C_DIM}↩️  No, take me back${C_RESET}"
+        echo -e "\n   ${C_DIM}───────────────────────────────────────────────────${C_RESET}"
+        read -r -p "$(echo -e ${C_PROMPT}"👉 Select an option: "${C_RESET})" uchoice || return
+        case $uchoice in
+            1) uninstall_script; return ;;
+            0) return ;;
+            *) invalid_option ;;
+        esac
+    done
+}
+
 system_hub() {
     while true; do
         show_banner
@@ -9087,12 +9107,14 @@ system_hub() {
         _hub_item "1" "🔄 Auto-Reboot Task"   "Schedule automatic reboots"
         _hub_item "2" "🕐 Timezone"           "Set the server timezone"
         _hub_item "3" "⬇️ Update Script"      "Fetch latest menu.sh from the repo"
+        _hub_item "4" "🗑️ Uninstall Script ▸" "Remove script & all data"
         _hub_footer
         read -r -p "$(echo -e ${C_PROMPT}"👉 Select an option: "${C_RESET})" choice || return
         case $choice in
             1) auto_reboot_menu ;;
             2) timezone_menu ;;
             3) update_script ;;
+            4) uninstall_hub ;;
             0) return ;;
             *) invalid_option ;;
         esac
@@ -9768,7 +9790,7 @@ main_menu() {
         _mi "06" "⚙️ SYSTEM & SERVER" "▸"
         _mi "07" "🤖 INTEGRATIONS" "▸"
         echo -e "${C_BLUE} ═══════════════════════════════════════════════════════════${C_RESET}"
-        echo -e "  ${C_PURPLE}[${C_GREEN}99${C_PURPLE}]${C_RESET} ${C_WARN}⇨${C_RESET} ${C_WARN}[!]${C_RESET} ${C_DANGER}🔥 UNINSTALL SCRIPT${C_RESET}   ${C_GRAY}|${C_RESET}   ${C_PURPLE}[${C_GREEN}0${C_PURPLE}]${C_RESET} ${C_WARN}⇦${C_RESET} ${C_DIM}${C_WARN}[ EXIT ]${C_RESET}"
+        echo -e "                       ${C_PURPLE}[${C_GREEN}0${C_PURPLE}]${C_RESET} ${C_WARN}⇦${C_RESET} ${C_DIM}${C_WARN}[ EXIT ]${C_RESET}"
         echo -e "${C_BLUE} ═══════════════════════════════════════════════════════════${C_RESET}"
         if ! read -r -p "$(echo -e ${C_PROMPT}"👉 Select an option: "${C_RESET})" choice; then
             echo
