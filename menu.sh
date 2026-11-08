@@ -8921,7 +8921,7 @@ _hub_header() {
     echo -e "\n   ${C_TITLE}═══════════════[ ${C_BOLD}$1${C_RESET}${C_TITLE} ]═══════════════${C_RESET}\n"
 }
 _hub_item() { # $1 num  $2 label  $3 description
-    printf "     ${C_CHOICE}[%2s]${C_RESET} %-24s ${C_DIM}%s${C_RESET}\n" "$1" "$2" "$3"
+    printf "     ${C_CHOICE}[%2s]${C_RESET} %s\033[35G${C_DIM}%s${C_RESET}\n" "$1" "$2" "$3"
 }
 _hub_footer() {
     echo -e "\n   ${C_DIM}───────────────────────────────────────────────────${C_RESET}"
