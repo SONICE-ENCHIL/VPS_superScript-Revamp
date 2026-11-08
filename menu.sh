@@ -9030,7 +9030,7 @@ monitoring_hub() {
         read -r -p "$(echo -e ${C_PROMPT}"👉 Select an option: "${C_RESET})" choice || return
         case $choice in
             1) traffic_monitor_menu ;;
-            2) client_details_menu; press_enter ;;
+            2) client_details_menu ;;
             3) service_info_menu ;;
             0) return ;;
             *) invalid_option ;;
@@ -9051,7 +9051,7 @@ access_hub() {
         case $choice in
             1) ssh_banner_menu ;;
             2) content_filter_menu ;;
-            3) bypass_proxy_menu; press_enter ;;
+            3) bypass_proxy_menu ;;
             4) grant_root_menu ;;
             0) return ;;
             *) invalid_option ;;
@@ -9673,7 +9673,7 @@ integrations_hub() {
         read -r -p "$(echo -e ${C_PROMPT}"👉 Select an option: "${C_RESET})" choice || return
         case $choice in
             1) telegram_bot_menu; press_enter ;;
-            2) rest_api_menu; press_enter ;;
+            2) rest_api_menu ;;
             3) duckdns_menu ;;
             4) gcp_vless_menu ;;
             0) return ;;
