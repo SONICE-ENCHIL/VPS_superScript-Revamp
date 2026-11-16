@@ -9011,17 +9011,15 @@ more_users_hub() {
     while true; do
         show_banner
         _hub_header "➕ MORE USER TOOLS"
-        _hub_item "1" "⏱️  Trial Account"   "Create a time-limited trial user"
-        _hub_item "2" "💾 Backup Users"      "Export the user database"
-        _hub_item "3" "📥 Restore Users"     "Import users from a backup"
-        _hub_item "4" "🧹 Cleanup Expired"   "Remove expired accounts"
+        _hub_item "1" "💾 Backup Users"      "Export the user database"
+        _hub_item "2" "📥 Restore Users"     "Import users from a backup"
+        _hub_item "3" "🧹 Cleanup Expired"   "Remove expired accounts"
         _hub_footer
         read -r -p "$(echo -e ${C_PROMPT}"👉 Select an option: "${C_RESET})" choice || return
         case $choice in
-            1) create_trial_account; press_enter ;;
-            2) backup_user_data; press_enter ;;
-            3) restore_user_data; press_enter ;;
-            4) cleanup_expired; press_enter ;;
+            1) backup_user_data; press_enter ;;
+            2) restore_user_data; press_enter ;;
+            3) cleanup_expired; press_enter ;;
             0) return ;;
             *) invalid_option ;;
         esac
