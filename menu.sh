@@ -748,7 +748,7 @@ ensure_VPS_superScript_system_group() {
 
 db_has_user() {
     [[ -f "$DB_FILE" ]] || return 1
-    awk -F: -v target="$1" '$1 == target { found=1; exit } END { exit(found ? 0 : 1) }' "$DB_FILE"
+    awk -F: -v target="$(printf '%s' "$1" | tr 'A-Z' 'a-z')" 'tolower($1) == target { found=1; exit } END { exit(found ? 0 : 1) }' "$DB_FILE"
 }
 
 # Safely rewrite a user's record, preserving all fields.
@@ -761,11 +761,11 @@ db_set_user() {
     [[ -f "$DB_FILE" ]] || return 1
     local tmp
     tmp=$(mktemp) || return 1
-    _FF_DB_USER="$1" _FF_DB_PASS="$2" _FF_DB_EXPIRY="$3" \
+    _FF_DB_USER="$(printf '%s' "$1" | tr 'A-Z' 'a-z')" _FF_DB_PASS="$2" _FF_DB_EXPIRY="$3" \
     _FF_DB_LIMIT="$4" _FF_DB_BW="$5" _FF_DB_MARKER="$6" \
     _FF_DB_HWID="${7:-}" _FF_DB_STRICT="${8:-0}" _FF_DB_APP="${9:-http}" \
     awk -F: 'BEGIN { OFS=":" }
-        $1 == ENVIRON["_FF_DB_USER"] {
+        tolower($1) == ENVIRON["_FF_DB_USER"] {
             print ENVIRON["_FF_DB_USER"], ENVIRON["_FF_DB_PASS"], ENVIRON["_FF_DB_EXPIRY"], \
                   ENVIRON["_FF_DB_LIMIT"], ENVIRON["_FF_DB_BW"], ENVIRON["_FF_DB_MARKER"], \
                   ENVIRON["_FF_DB_HWID"], ENVIRON["_FF_DB_STRICT"], ENVIRON["_FF_DB_APP"]
@@ -782,7 +782,7 @@ db_set_user() {
 # Usage: db_get_field <user> <field_number>
 db_get_field() {
     [[ -f "$DB_FILE" ]] || { echo ""; return 1; }
-    awk -F: -v u="$1" -v n="$2" '$1 == u { print $n; exit }' "$DB_FILE"
+    awk -F: -v u="$(printf '%s' "$1" | tr 'A-Z' 'a-z')" -v n="$2" 'tolower($1) == u { print $n; exit }' "$DB_FILE"
 }
 
 # Populate FF_TRIAL_USERS from users.db. Field 6 is the account marker; only
@@ -817,15 +817,16 @@ _ff_sorted_user_names() {
 # runs with VSS_ACTOR=<actor> and only ever sees/touches rows owned by it.
 _own_get() {
     local _o=""
-    [[ -f "$OWNER_FILE" ]] && _o=$(awk -F: -v u="$1" '$1==u{print $2; exit}' "$OWNER_FILE" 2>/dev/null)
+    [[ -f "$OWNER_FILE" ]] && _o=$(awk -F: -v u="$(printf '%s' "$1" | tr 'A-Z' 'a-z')" 'tolower($1)==u{print $2; exit}' "$OWNER_FILE" 2>/dev/null)
     printf '%s' "${_o:-admin}"
 }
 _own_set() { # <user> <owner>
     local _u="$1" _o="$2" _tmp
+    _u="$(printf '%s' "$_u" | tr 'A-Z' 'a-z')"
     mkdir -p "$DB_DIR"; touch "$OWNER_FILE"; chmod 600 "$OWNER_FILE" 2>/dev/null
     _tmp=$(mktemp) || return 1
     _OWN_U="$_u" _OWN_O="$_o" awk -F: 'BEGIN { OFS=":" }
-        $1 == ENVIRON["_OWN_U"] { $2 = ENVIRON["_OWN_O"]; found=1; print; next }
+        tolower($1) == ENVIRON["_OWN_U"] { $2 = ENVIRON["_OWN_O"]; found=1; print; next }
         { print }
         END { if (!found) print ENVIRON["_OWN_U"] ":" ENVIRON["_OWN_O"] }
     ' "$OWNER_FILE" > "$_tmp" && mv "$_tmp" "$OWNER_FILE"
@@ -836,9 +837,10 @@ _own_set() { # <user> <owner>
 }
 _own_remove() {
     local _u="$1" _tmp
+    _u="$(printf '%s' "$_u" | tr 'A-Z' 'a-z')"
     [[ -f "$OWNER_FILE" ]] || return 0
     _tmp=$(mktemp) || return 1
-    awk -F: -v u="$_u" '$1!=u' "$OWNER_FILE" > "$_tmp" && mv "$_tmp" "$OWNER_FILE"
+    awk -F: -v u="$_u" 'tolower($1)!=u' "$OWNER_FILE" > "$_tmp" && mv "$_tmp" "$OWNER_FILE"
     rm -f "$_tmp" 2>/dev/null
     chmod 600 "$OWNER_FILE" 2>/dev/null
 }
@@ -853,6 +855,21 @@ _own_guard() {
 }
 _ff_valid_managed_username() {
     [[ "$1" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]]
+}
+
+# True (0) when the username is a reserved system name (root, etc.) or already
+# exists as a system account, compared case-insensitively. Used to block account
+# creation that would collide with root or other privileged system users.
+_ff_is_reserved_or_system_username() {
+    local u="$1" lu
+    lu=$(printf '%s' "$u" | tr 'A-Z' 'a-z')
+    case "$lu" in
+        root|adm|bin|daemon|lp|mail|news|uucp|proxy|www-data|backup|list|irc|gnats|nobody|systemd-network|systemd-resolve|systemd-timesync|ftp|sshd|sync|shutdown|halt|operator|games|man|lpnews) return 0 ;;
+    esac
+    if [[ -r /etc/passwd ]]; then
+        awk -F: -v target="$lu" 'tolower($1) == target { found=1; exit } END { exit(found ? 0 : 1) }' /etc/passwd && return 0
+    fi
+    return 1
 }
 
 # Regenerate the enforcer's runtime mirror from users.db, keeping only rows that
@@ -2128,7 +2145,7 @@ TRIAL_DIR="/etc/VPS_superScript/trials"
 username="$1"
 if [[ -z "$username" ]]; then exit 1; fi
 
-db_line=$(grep "^${username}:" "$DB_FILE" 2>/dev/null | head -n 1)
+db_line=$(grep -i "^${username}:" "$DB_FILE" 2>/dev/null | head -n 1)
 if [[ -z "$db_line" ]]; then exit 0; fi
 
 IFS=: read -r _ _ _ _ _ trial_marker _rest <<< "$db_line"
@@ -2473,6 +2490,8 @@ create_user() {
     clear; show_banner
     echo -e "${C_BOLD}${C_PURPLE}--- ✨ Create New SSH User ---${C_RESET}"
     read -r -p "👤 user: " username
+    # Normalize to lowercase so "User1" and "user1" are the same account.
+    username="$(printf '%s' "$username" | tr 'A-Z' 'a-z')"
     local adopt_existing=false
     if [[ "$username" == "0" ]]; then
         echo -e "\n${C_YELLOW}❌ User creation cancelled.${C_RESET}"
@@ -2480,6 +2499,11 @@ create_user() {
     fi
     if [[ -z "$username" ]]; then
         echo -e "\n${C_RED}❌ Error: Username cannot be empty.${C_RESET}"
+        return
+    fi
+    # Block reserved / root-privileged system names (case-insensitive).
+    if _ff_is_reserved_or_system_username "$username"; then
+        echo -e "\n${C_RED}❌ Error: '$username' is a reserved system name and cannot be used.${C_RESET}"
         return
     fi
     if [[ -n "${VSS_ACTOR:-}" ]] && ! _ff_valid_managed_username "$username"; then
@@ -2769,7 +2793,7 @@ view_user_details() {
     clear; show_banner
     echo -e "${C_BOLD}${C_PURPLE}--- 👁️ User Details: ${C_YELLOW}$username${C_PURPLE} ---${C_RESET}"
 
-    local line; line=$(grep "^$username:" "$DB_FILE")
+    local line; line=$(grep -i "^${username}:" "$DB_FILE")
     if [[ -z "$line" ]]; then
         echo -e "\n${C_RED}❌ User '$username' not found in database.${C_RESET}"
         return
@@ -2854,7 +2878,7 @@ edit_user() {
         clear; show_banner; echo -e "${C_BOLD}${C_PURPLE}--- Editing User: ${C_YELLOW}$username${C_PURPLE} ---${C_RESET}"
         
         # Show current user details
-        local current_line; current_line=$(grep "^$username:" "$DB_FILE")
+        local current_line; current_line=$(grep -i "^${username}:" "$DB_FILE")
         local cur_pass cur_expiry cur_limit cur_bw cur_marker cur_hwid cur_strict cur_app
         IFS=: read -r _ cur_pass cur_expiry cur_limit cur_bw cur_marker cur_hwid cur_strict cur_app <<< "$current_line"
         [[ -z "$cur_bw" ]] && cur_bw="0"
@@ -3531,7 +3555,7 @@ unlock_user() {
 
         # Clear the limiter's re-lock CAUSES so the unlock actually holds.
         local dbline exp bw
-        dbline=$(grep "^${u}:" "$DB_FILE" 2>/dev/null)
+        dbline=$(grep -i "^${u}:" "$DB_FILE" 2>/dev/null)
         IFS=: read -r _ _ exp _ bw _ <<< "$dbline"
         # (a) Bandwidth quota: reset usage to 0 when at/over the cap so the
         #     limiter daemon does not immediately re-lock (admin-chosen policy).
@@ -3880,7 +3904,7 @@ renew_user() {
         _own_guard "$u" || continue
         chage -E "$new_expire_date" "$u"
         local line pass _expiry limit bw marker hwid strict app
-        line=$(grep "^$u:" "$DB_FILE")
+        line=$(grep -i "^${u}:" "$DB_FILE")
         IFS=: read -r _ pass _expiry limit bw marker hwid strict app <<< "$line"
         [[ -z "$bw" ]] && bw="0"
         [[ -z "$strict" ]] && strict="0"
@@ -7528,7 +7552,7 @@ create_trial_account() {
     
     echo -e "\n${C_CYAN}Enter trial duration (official format). Examples: 30m · 2h · 1d · 2d4h30m${C_RESET}"
     local duration_input=""
-    read -p "🗓️ Duration (e.g. 30m, 2h, 1d, 2d4h30m): " duration_input
+    read -p "🗓️ Duration: " duration_input
     if [[ -z "$duration_input" ]]; then
         echo -e "\n${C_YELLOW}❌ Cancelled.${C_RESET}"; return
     fi
@@ -7542,19 +7566,25 @@ create_trial_account() {
     # Username
     local rand_suffix=$(tr -dc 'a-z0-9' < /dev/urandom | head -c 5)
     local default_username="trial_${rand_suffix}"
-    read -p "👤 Username [${default_username}]: " username
+    read -p "👤 Username: " username
     username=${username:-$default_username}
+    # Normalize to lowercase so "TrialUser" and "trialuser" are the same account.
+    username="$(printf '%s' "$username" | tr 'A-Z' 'a-z')"
     
-    if id "$username" &>/dev/null || grep -q "^$username:" "$DB_FILE"; then
-        echo -e "\n${C_RED}❌ Error: User '$username' already exists.${C_RESET}"; return
+    # Block reserved / root-privileged system names (case-insensitive).
+    if _ff_is_reserved_or_system_username "$username"; then
+        echo -e "\n${C_RED}❌ Error: '$username' is a reserved system name and cannot be used.${C_RESET}"; return
     fi
     if [[ -n "${VSS_ACTOR:-}" ]] && ! _ff_valid_managed_username "$username"; then
         echo -e "\n${C_RED}❌ Invalid username. Use lowercase letters, numbers, '_' or '-' (must start with a letter/underscore).${C_RESET}"; return
     fi
+    if id "$username" &>/dev/null || db_has_user "$username"; then
+        echo -e "\n${C_RED}❌ Error: User '$username' already exists.${C_RESET}"; return
+    fi
 
     # Password
     local password=$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 8)
-    read -p "🔑 Password [${password}]: " custom_pass
+    read -p "🔑 Password: " custom_pass
     password=${custom_pass:-$password}
     
     # Connection limit
@@ -8012,7 +8042,7 @@ client_config_menu() {
     if [[ "$u" == "NO_USERS" || -z "$u" ]]; then return; fi
     
     # We need to find the password. It's in the DB.
-    local pass=$(grep "^$u:" "$DB_FILE" | cut -d: -f2)
+    local pass=$(grep -i "^${u}:" "$DB_FILE" | cut -d: -f2)
     generate_client_config "$u" "$pass"
 }
 
@@ -11394,7 +11424,7 @@ client_details_menu() {
         locked=0
         while IFS=: read -r u _ _ _ _ _ _ _; do
             if [[ -n "$u" ]]; then
-                local shadow=$(grep "^${u}:" /etc/shadow 2>/dev/null)
+                local shadow=$(grep -i "^${u}:" /etc/shadow 2>/dev/null)
                 [[ "$shadow" == *"!"* ]] && ((locked++))
             fi
         done < "$DB_FILE"
